@@ -53,8 +53,8 @@ main() {
     fi
 
     case "$1" in
-      ps)
-        mydev_proc_ps
+      connect)
+        wrish_bluetooth_connect "$WRISH_MAC"
         ;;
       login)
         mydev_login_host "$hosts" "$2"

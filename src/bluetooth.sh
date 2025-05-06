@@ -58,3 +58,42 @@ wrish_bluetooth_read_attribute() {
   } | bluetoothctl
 
 }
+
+wrish_bluetooth_connect() {
+  local wrish_mac
+  local interface
+  local interface_status
+
+  interface=$(hciconfig | grep -o 'hci[0-9]*')
+  interface_status=$(hciconfig "${interface}" | grep -o 'UP' | wc -l)
+
+  if [ "$interface_status" -eq 0 ]; then
+    echo "Bluetooth interface ${interface} is down. Type 'sudo hciconfig ${interface} up' to bring it up."
+    exit 1
+  fi
+
+  echo "Connecting to ${interface}..."
+
+  wrish_mac="$1"
+
+  {
+    echo "disconnect ${wrish_mac}"
+    sleep 10
+    echo "power off"
+    sleep 10
+    echo "power on"
+    sleep 10
+    echo "connect ${wrish_mac}"
+    sleep 10
+    echo "info ${wrish_mac}"
+    sleep 10
+    echo "exit"
+  } | bluetoothctl
+}
+
+wrist_bluetooth_power() {
+  {
+    echo "power $1"
+    echo "exit"
+  } | bluetoothctl
+}
