@@ -13,7 +13,7 @@ set -e
 # @file_type: build-entrypoint
 # @build_type: bin
 # @build_with: Mush v0.2.0 (2026-03-21 develop)
-# @build_date: 2026-03-27T21:14:17Z
+# @build_date: 2026-03-27T21:17:24Z
 
 # @section_code: SC005
 # @section_name: functions
@@ -148,7 +148,8 @@ main() {
         wrish_router_heart_rate "$@"
         ;;
       deep-read)
-        wrish_bluetooth_deep_read "${WRISH_MAC}"
+        shift
+        wrish_bluetooth_deep_read "${WRISH_MAC}" "$@"
         ;;
       *)
         echo "Unknown command: $1. Run 'wrish --help' for usage." >&2
@@ -242,6 +243,7 @@ wrish_bluetooth_read_attribute() {
 # Args: <mac>
 wrish_bluetooth_deep_read() {
     local mac
+    local raw_mode=0
     local raw_attrs
     local uuids
     local uuid
@@ -249,7 +251,14 @@ wrish_bluetooth_deep_read() {
     local stripped
     local chunk
     local idx
-    mac="$1"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --raw) raw_mode=1 ;;
+            *) mac="$1" ;;
+        esac
+        shift
+    done
 
     echo "[deep-read] listing attributes on ${mac}..." >&2
 
@@ -292,6 +301,11 @@ wrish_bluetooth_deep_read() {
             echo "exit"
         } | bluetoothctl 2>&1
     )
+
+    if [ "$raw_mode" -eq 1 ]; then
+        echo "$output"
+        return 0
+    fi
 
     # Step 3: strip ANSI codes, then split on sentinel lines.
     # In the GATT submenu, an unknown command like "--" produces:

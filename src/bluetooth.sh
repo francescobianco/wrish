@@ -76,6 +76,7 @@ wrish_bluetooth_read_attribute() {
 # Args: <mac>
 wrish_bluetooth_deep_read() {
     local mac
+    local raw_mode=0
     local raw_attrs
     local uuids
     local uuid
@@ -83,7 +84,14 @@ wrish_bluetooth_deep_read() {
     local stripped
     local chunk
     local idx
-    mac="$1"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --raw) raw_mode=1 ;;
+            *) mac="$1" ;;
+        esac
+        shift
+    done
 
     echo "[deep-read] listing attributes on ${mac}..." >&2
 
@@ -126,6 +134,11 @@ wrish_bluetooth_deep_read() {
             echo "exit"
         } | bluetoothctl 2>&1
     )
+
+    if [ "$raw_mode" -eq 1 ]; then
+        echo "$output"
+        return 0
+    fi
 
     # Step 3: strip ANSI codes, then split on sentinel lines.
     # In the GATT submenu, an unknown command like "--" produces:

@@ -116,7 +116,8 @@ main() {
         wrish_router_heart_rate "$@"
         ;;
       deep-read)
-        wrish_bluetooth_deep_read "${WRISH_MAC}"
+        shift
+        wrish_bluetooth_deep_read "${WRISH_MAC}" "$@"
         ;;
       *)
         echo "Unknown command: $1. Run 'wrish --help' for usage." >&2
