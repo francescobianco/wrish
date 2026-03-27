@@ -13,7 +13,7 @@ set -e
 # @file_type: build-entrypoint
 # @build_type: bin
 # @build_with: Mush v0.2.0 (2026-03-21 develop)
-# @build_date: 2026-03-27T20:19:07Z
+# @build_date: 2026-03-27T20:22:47Z
 
 # @section_code: SC005
 # @section_name: functions
@@ -583,57 +583,83 @@ wrish_c60a82c_notify() {
         esac
     done
 
-    echo "[notify] checking device info..." >&2
+    echo "[notify] device: ${mac}" >&2
     wrish_gatt_info "$mac"
 
-    app_type=$(wrish_c60a82c_app_type "$app_name")
-    read -ra msg_type_bytes <<< "$(wrish_c60a82c_build_set_message_type "$app_type")"
-    read -ra title_bytes    <<< "$(wrish_c60a82c_build_set_message2 1 "$title")"
-    read -ra body_bytes     <<< "$(wrish_c60a82c_build_set_message2 2 "$body")"
+    python3 - --app "$app_name" --title "$title" --body "$body" --mac "$mac" << 'PYEOF'
+import argparse, sys, time, dbus, dbus.mainloop.glib
+from gi.repository import GLib
 
-    hex_type=$(wrish_c60a82c_to_hex_str "${msg_type_bytes[@]}")
-    hex_title=$(wrish_c60a82c_to_hex_str "${title_bytes[@]}")
-    hex_body=$(wrish_c60a82c_to_hex_str "${body_bytes[@]}")
+APP_TYPES = {
+    "wechat":2,"qq":3,"facebook":4,"skype":5,"twitter":6,"whatsapp":7,
+    "line":8,"linkedin":9,"instagram":10,"messenger":12,"vk":13,"viber":14,
+    "telegram":16,"kakaotalk":18,"douyin":32,"kuaishou":33,"douyin_lite":34,
+    "maimai":52,"pinduoduo":53,"work_wechat":54,"tantan":56,"taobao":57,
+}
 
-    wrish_gatt_open "$mac" || return 1
+def ck(bs): s=sum(bs)&0xFF; return ((s*0x56)+0x5A)&0xFF
+def f_type(t): bs=[0x0A,0x02,0x00,0x00,t]; return bs+[ck(bs)]
+def f_msg(k,text,mx):
+    tb=list(text[:mx].encode("utf-8")); p=1+len(tb)
+    bs=[0x0A,p&0xFF,(p>>8)&0xFF,k]+tb; return bs+[ck(bs)]
+END=[0x0A,0x01,0x00,0x03,0x0E]
 
-    wrish_gatt_select "$C60_A82C_UUID_NOTIFY"
-    wrish_gatt_notify_on
+parser=argparse.ArgumentParser()
+parser.add_argument("--app",default="whatsapp")
+parser.add_argument("--title",default="")
+parser.add_argument("--body",default="")
+parser.add_argument("--mac",default="A4:C1:38:9A:A8:2C")
+args=parser.parse_args()
 
-    wrish_gatt_select "$C60_A82C_UUID_WRITE"
+mac=args.mac.replace(":","_")
+dev_path=f"/org/bluez/hci0/dev_{mac}"
+ff01_path=dev_path+"/service000c/char000d"
+ff02_path=dev_path+"/service000c/char0010"
 
-    echo "[notify] → setMessageType (${app_name})" >&2
-    wrish_gatt_write_wait_ack "$hex_type" 0
+dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+bus=dbus.SystemBus()
+dev=bus.get_object("org.bluez",dev_path)
+dev_props=dbus.Interface(dev,"org.freedesktop.DBus.Properties")
 
-    echo "[notify] → title" >&2
-    wrish_gatt_write_wait_ack "$hex_title" 1
+if not dev_props.Get("org.bluez.Device1","Connected"):
+    print("[notify] connecting...",file=sys.stderr)
+    dbus.Interface(dev,"org.bluez.Device1").Connect()
+    for _ in range(20):
+        time.sleep(0.5)
+        if dev_props.Get("org.bluez.Device1","Connected"): break
+    else:
+        print("[notify] ERROR: could not connect",file=sys.stderr); sys.exit(1)
 
-    echo "[notify] → body" >&2
-    # body may be split into chunks
-    local i
-    local n
-    local chunk_bytes
-    local chunk_hex
-    local chunk_size
-    chunk_size=20
-    i=0
-    n=${#body_bytes[@]}
-    while (( i < n )); do
-        chunk_bytes=("${body_bytes[@]:$i:$chunk_size}")
-        chunk_hex=$(wrish_c60a82c_to_hex_str "${chunk_bytes[@]}")
-        if (( i + chunk_size >= n )); then
-            wrish_gatt_write_wait_ack "$chunk_hex" 2
-        else
-            wrish_gatt_write_wait_ack "$chunk_hex"
-        fi
-        (( i += chunk_size ))
-    done
+ff01_iface=dbus.Interface(bus.get_object("org.bluez",ff01_path),"org.bluez.GattCharacteristic1")
+ff02_iface=dbus.Interface(bus.get_object("org.bluez",ff02_path),"org.bluez.GattCharacteristic1")
 
-    echo "[notify] → END_MESSAGE" >&2
-    wrish_gatt_write_wait_ack "0x0A 0x01 0x00 0x03 0x0E" 3
+frames=[f_type(APP_TYPES.get(args.app.lower(),7)),f_msg(1,args.title,32),f_msg(2,args.body,128),END]
+acks={}
+loop=GLib.MainLoop()
 
-    wrish_gatt_close
-    echo "[notify] done" >&2
+def on_chg(iface,changed,inv,path=None):
+    if "Value" not in changed or "char000d" not in str(path or""): return
+    val=list(changed["Value"])
+    if len(val)>=4 and val[0]==0x8A: acks[val[3]]=val
+
+bus.add_signal_receiver(on_chg,signal_name="PropertiesChanged",
+    dbus_interface="org.freedesktop.DBus.Properties",path_keyword="path")
+
+def run():
+    ff01_iface.StartNotify(); time.sleep(0.3)
+    for stage,frame in enumerate(frames):
+        for i in range(0,len(frame),20):
+            ff02_iface.WriteValue(dbus.Array([dbus.Byte(b) for b in frame[i:i+20]],signature="y"),{})
+            time.sleep(0.2)
+        deadline=time.time()+8
+        while stage not in acks and time.time()<deadline:
+            GLib.MainContext.default().iteration(False); time.sleep(0.05)
+        print(f"[notify] stage {stage} {'OK' if stage in acks else 'no ACK'}",file=sys.stderr)
+    ff01_iface.StopNotify(); loop.quit()
+
+GLib.timeout_add(200,run); loop.run()
+sys.exit(0 if len(acks)==4 else 1)
+PYEOF
 }
 
 # Subscribe to heart rate notifications (listens for 30 s by default)
