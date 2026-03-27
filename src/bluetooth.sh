@@ -8,13 +8,13 @@ wrish_bluetooth_scan() {
         echo "scan off"
         echo "devices"
         echo "exit"
-    } | bluetoothctl | grep Device | awk '{print "[" $2 "] " $3}'
+    } | bluetoothctl | grep -E 'Device ([0-9A-F]{2}:){5}[0-9A-F]{2}' | awk '{print "[" $2 "] " $3}'
 }
 
 wrish_bluetooth_list() {
 
 
-    echo -e 'devices\nexit' | bluetoothctl | grep Device | awk '{print "[" $2 "] " $3}'
+    echo -e 'devices\nexit' | bluetoothctl | grep -E 'Device ([0-9A-F]{2}:){5}[0-9A-F]{2}' | awk '{print "[" $2 "] " $3}'
 
 }
 
