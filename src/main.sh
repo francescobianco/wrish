@@ -2,6 +2,7 @@
 module bluetooth
 module gatt
 module devices
+module router
 
 _wrish_load_rc() {
   local rc
@@ -99,15 +100,15 @@ main() {
         wrish_bluetooth_connect "$WRISH_MAC"
         ;;
       info)
-        wrish_c60a82c_info "$WRISH_MAC"
+        wrish_router_info
         ;;
       notify)
         shift
-        wrish_c60a82c_notify "$@"
+        wrish_router_notify "$@"
         ;;
       heart-rate)
         shift
-        wrish_c60a82c_heart_rate_monitor "$@"
+        wrish_router_heart_rate "$@"
         ;;
       *)
         echo "Unknown command: $1. Run 'wrish --help' for usage." >&2

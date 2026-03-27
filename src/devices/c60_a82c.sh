@@ -90,39 +90,39 @@ wrish_c60a82c_app_type() {
     esac
 }
 
-# Read device name from GATT 0x2A00 via D-Bus ObjectManager
+# Read device info including name from GATT 0x2A00 (via BlueZ Device1.Name)
 # Args: <mac>
 wrish_c60a82c_info() {
     local mac
     mac="${1:-${WRISH_MAC}}"
 
-    wrish_gatt_info "$mac"
-
     python3 - "$mac" << 'EOF'
 import sys, dbus
 
-mac = sys.argv[1].replace(":", "_")
-dev_path = f"/org/bluez/hci0/dev_{mac}"
+mac = sys.argv[1]
+mac_path = mac.replace(":", "_")
+dev_path = f"/org/bluez/hci0/dev_{mac_path}"
 
 bus = dbus.SystemBus()
-mgr = dbus.Interface(bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager")
-objects = mgr.GetManagedObjects()
+dev = bus.get_object("org.bluez", dev_path)
+props = dbus.Interface(dev, "org.freedesktop.DBus.Properties")
 
-for path, ifaces in objects.items():
-    if "org.bluez.GattCharacteristic1" not in ifaces:
-        continue
-    if dev_path not in str(path):
-        continue
-    uuid = str(ifaces["org.bluez.GattCharacteristic1"].get("UUID", ""))
-    if "00002a00" not in uuid:
-        continue
-    char = dbus.Interface(bus.get_object("org.bluez", path), "org.bluez.GattCharacteristic1")
-    val = bytes(char.ReadValue({})).rstrip(b"\x00").decode("ascii", errors="replace")
-    print(f"Device Name (0x2A00): {val}")
-    sys.exit(0)
+def get(key, default="n/a"):
+    try: return str(props.Get("org.bluez.Device1", key))
+    except: return default
 
-print("0x2A00 not found or not readable", file=sys.stderr)
-sys.exit(1)
+name      = get("Name")
+connected = get("Connected")
+paired    = get("Paired")
+trusted   = get("Trusted")
+rssi      = get("RSSI")
+
+print(f"MAC:              {mac}")
+print(f"Device Name (0x2A00): {name}")
+print(f"Connected:        {connected}")
+print(f"Paired:           {paired}")
+print(f"Trusted:          {trusted}")
+print(f"RSSI:             {rssi}")
 EOF
 }
 
