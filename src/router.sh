@@ -32,3 +32,11 @@ wrish_router_battery() {
         *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
     esac
 }
+
+# Route 'deep-read' to the correct device handler
+wrish_router_deep_read() {
+    case "${WRISH_DEVICE}" in
+        C60-A82C) wrish_c60a82c_deep_read "$@" ;;
+        *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
+    esac
+}

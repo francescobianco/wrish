@@ -1,6 +1,7 @@
 
 module bluetooth
 module gatt
+module gatttool
 module devices
 module router
 
@@ -117,7 +118,7 @@ main() {
         ;;
       deep-read)
         shift
-        wrish_bluetooth_deep_read "${WRISH_MAC}" "$@"
+        wrish_router_deep_read "$@"
         ;;
       *)
         echo "Unknown command: $1. Run 'wrish --help' for usage." >&2

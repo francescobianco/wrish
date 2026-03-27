@@ -97,24 +97,44 @@ wrish_c60a82c_app_type() {
     esac
 }
 
-# Read device info (requires connection). Args: <mac>
+# Read device info — real GATT read of 0x2A00 via gatttool. Args: <mac>
 wrish_c60a82c_info() {
     local mac
     mac="${1:-${WRISH_MAC}}"
 
-    wrish_gatt_ensure_connected "$mac" || return 1
+    echo "[info] reading device name from GATT 0x2A00 on ${mac}..." >&2
 
-    echo -e "info ${mac}\nexit" | bluetoothctl 2>/dev/null \
-        | grep -E '^\s+(Name|Alias|Connected|Paired|Trusted|RSSI)' \
-        | sed 's/^\s*//' \
-        | awk -F': ' '
-            /^Name/      { printf "Device Name (0x2A00): %s\n", $2 }
-            /^Alias/     { next }
-            /^Connected/ { printf "Connected:            %s\n", $2 }
-            /^Paired/    { printf "Paired:               %s\n", $2 }
-            /^Trusted/   { printf "Trusted:              %s\n", $2 }
-            /^RSSI/      { printf "RSSI:                 %s\n", $2 }
-        '
+    local raw
+    raw=$(wrish_gatttool_read_uuid "$mac" "00002a00-0000-1000-8000-00805f9b34fb")
+
+    # Extract hex bytes from: handle: 0x00XX   value: XX XX XX ...
+    local hex_bytes
+    hex_bytes=$(printf '%s\n' "$raw" \
+        | sed 's/\x1b\[[0-9;]*m//g' \
+        | grep -oP 'value: \K[0-9a-f ]+' \
+        | head -1 \
+        | sed 's/[[:space:]]*$//')
+
+    if [ -z "$hex_bytes" ]; then
+        echo "Error: could not read device name (not connected or no response)" >&2
+        return 1
+    fi
+
+    local name
+    name=$(printf '%s\n' "$hex_bytes" \
+        | tr ' ' '\n' \
+        | while IFS= read -r h; do
+            [ -n "$h" ] && printf "\\x${h}"
+          done \
+        | tr -cd '[:print:]')
+
+    echo "Device Name (0x2A00): ${name}"
+    echo "MAC:                  ${mac}"
+}
+
+# Deep read all GATT characteristics via gatttool. Args: [--raw]
+wrish_c60a82c_deep_read() {
+    wrish_gatttool_deep_read "${WRISH_MAC}" "$@"
 }
 
 # Read battery level via vendor command on FF02, response on FF01.
