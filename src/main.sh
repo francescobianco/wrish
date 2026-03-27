@@ -54,6 +54,10 @@ main() {
     fi
 
     case "$1" in
+      scan)
+        shift
+        wrish_bluetooth_scan "$@"
+        ;;
       connect)
         wrish_bluetooth_connect "$WRISH_MAC"
         ;;
