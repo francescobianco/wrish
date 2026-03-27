@@ -1,6 +1,6 @@
 
 module bluetooth
-module c60_a82c
+module devices
 
 main() {
 

@@ -13,7 +13,7 @@ set -e
 # @file_type: build-entrypoint
 # @build_type: bin
 # @build_with: Mush v0.2.0 (2026-03-21 develop)
-# @build_date: 2026-03-27T19:43:08Z
+# @build_date: 2026-03-27T19:49:07Z
 
 # @section_code: SC005
 # @section_name: functions
@@ -32,7 +32,7 @@ inject() { return 0; }
 # @portion_type: entrypoint
 
 module bluetooth
-module c60_a82c
+module devices
 
 main() {
 
@@ -229,7 +229,15 @@ wrist_bluetooth_power() {
 # @section_code: SC007
 # @section_name: source
 # @source_index: 3
-# @source_file: src/c60_a82c.sh
+# @source_file: src/devices/module.sh
+# @portion_type: module
+
+module c60_a82c
+
+# @section_code: SC007
+# @section_name: source
+# @source_index: 4
+# @source_file: src/devices/c60_a82c.sh
 # @portion_type: module
 
 module c60_a82c
@@ -297,32 +305,29 @@ wrish_c60a82c_build_set_message2() {
     echo "${frame[*]} $chk"
 }
 
-# Write a byte array to the device via gatttool, split into 20-byte chunks
-# Args: <mac> <handle> decimal byte values...
-wrish_c60a82c_gatttool_write() {
-    local mac
-    local handle
+# Output bluetoothctl write commands for a byte array, split into 20-byte chunks
+# Args: decimal byte values
+wrish_c60a82c_write_cmds() {
     local bytes
     local chunk_size
     local i
     local n
     local chunk
-    local hex
+    local line
     local b
-    mac="$1"
-    handle="$2"
-    shift 2
     bytes=("$@")
     chunk_size=20
     i=0
     n=${#bytes[@]}
     while (( i < n )); do
         chunk=("${bytes[@]:$i:$chunk_size}")
-        hex=""
+        line=""
         for b in "${chunk[@]}"; do
-            hex+="$(printf '%02X' $(( b )))"
+            [ -n "$line" ] && line+=" "
+            line+="$(printf '0x%02X' $(( b )))"
         done
-        gatttool -b "$mac" --char-write-req -a "$handle" -n "$hex"
+        echo "write \"${line}\""
+        sleep 1
         (( i += chunk_size ))
     done
 }
@@ -384,14 +389,26 @@ wrish_c60a82c_notify() {
     read -ra msg_type_bytes <<< "$(wrish_c60a82c_build_set_message_type "$app_type")"
     read -ra title_bytes    <<< "$(wrish_c60a82c_build_set_message2 1 "$title")"
     read -ra body_bytes     <<< "$(wrish_c60a82c_build_set_message2 2 "$body")"
-    gatttool -b "$mac" --char-write-req -a "$C60_A82C_HANDLE_NOTIFY_CCCD" -n 0100
-    wrish_c60a82c_gatttool_write "$mac" "$C60_A82C_HANDLE_WRITE" "${msg_type_bytes[@]}"
-    sleep 1
-    wrish_c60a82c_gatttool_write "$mac" "$C60_A82C_HANDLE_WRITE" "${title_bytes[@]}"
-    sleep 1
-    wrish_c60a82c_gatttool_write "$mac" "$C60_A82C_HANDLE_WRITE" "${body_bytes[@]}"
-    sleep 1
-    gatttool -b "$mac" --char-write-req -a "$C60_A82C_HANDLE_WRITE" -n 0A0100030E
+    {
+        echo "connect ${mac}"
+        sleep 3
+        echo "menu gatt"
+        echo "select-attribute ${C60_A82C_UUID_NOTIFY}"
+        echo "notify on"
+        sleep 1
+        echo "select-attribute ${C60_A82C_UUID_WRITE}"
+        wrish_c60a82c_write_cmds "${msg_type_bytes[@]}"
+        sleep 2
+        wrish_c60a82c_write_cmds "${title_bytes[@]}"
+        sleep 2
+        wrish_c60a82c_write_cmds "${body_bytes[@]}"
+        sleep 2
+        echo 'write "0x0A 0x01 0x00 0x03 0x0E"'
+        sleep 2
+        echo "back"
+        echo "disconnect ${mac}"
+        echo "exit"
+    } | bluetoothctl
 }
 
 # Subscribe to heart rate notifications (listens for 30 s by default)
@@ -408,13 +425,17 @@ wrish_c60a82c_heart_rate_monitor() {
             *) echo "Unknown option: $1" >&2; return 1 ;;
         esac
     done
-    gatttool -b "$mac" --char-write-req -a "$C60_A82C_HANDLE_HR_CCCD" -n 0100
-    gatttool -b "$mac" --listen -a "$C60_A82C_HANDLE_HR" --timeout "$duration" 2>&1 | \
-        grep -oP '(?<=value: )[\da-f ]+' | while read -r raw; do
-            local val
-            val=$(( 16#$(echo "$raw" | awk '{print $2}') ))
-            echo "Heart rate: ${val} bpm"
-        done
+    {
+        echo "connect ${mac}"
+        sleep 3
+        echo "menu gatt"
+        echo "select-attribute ${C60_A82C_UUID_HR}"
+        echo "notify on"
+        sleep "$duration"
+        echo "back"
+        echo "disconnect ${mac}"
+        echo "exit"
+    } | bluetoothctl
 }
 # @section_code: SC006
 # @section_name: entrypoint
