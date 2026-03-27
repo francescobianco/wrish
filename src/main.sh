@@ -15,6 +15,31 @@ main() {
       case "$1" in
         -*)
           case "$1" in
+            --help|-h)
+              echo "wrish — wristband control CLI"
+              echo ""
+              echo "USAGE:"
+              echo "  wrish [OPTIONS] <COMMAND>"
+              echo ""
+              echo "OPTIONS:"
+              echo "  --list        List all known Bluetooth devices"
+              echo "  --info        Show info and attributes of the connected device"
+              echo "  -h, --help    Show this help message"
+              echo ""
+              echo "COMMANDS:"
+              echo "  scan [secs]               Scan for nearby BT devices (default 10s)"
+              echo "  connect                   Connect to the configured device (${WRISH_DEVICE})"
+              echo "  notify [OPTIONS]          Send a notification to the bracelet"
+              echo "    --app <name>            App type (whatsapp, telegram, instagram, ...)"
+              echo "    --title <text>          Notification title (max 32 chars)"
+              echo "    --body <text>           Notification body (max 128 chars)"
+              echo "  heart-rate [OPTIONS]      Monitor heart rate"
+              echo "    --duration <secs>       Listen duration (default 30s)"
+              echo ""
+              echo "DEVICE:"
+              echo "  ${WRISH_DEVICE} — ${WRISH_MAC}"
+              exit 0
+              ;;
             --list)
               list=true
               shift

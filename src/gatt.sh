@@ -41,12 +41,11 @@ wrish_gatt_ensure_connected() {
 }
 
 # Open a persistent GATT session to a device
+# Waits for "Connection successful" and "ServicesResolved: yes" before returning
 # Args: <mac>
 wrish_gatt_open() {
     local mac
     mac="$1"
-
-    wrish_gatt_ensure_connected "$mac" || return 1
 
     # Launch bluetoothctl as a coproc
     coproc WRISH_BT { bluetoothctl 2>&1; }
@@ -54,9 +53,20 @@ wrish_gatt_open() {
     WRISH_GATT_FD_IN=${WRISH_BT[1]}
     WRISH_GATT_FD_OUT=${WRISH_BT[0]}
 
+    # Connect and wait for services to be resolved
+    wrish_gatt_send "connect $mac"
+    wrish_gatt_wait "Connection successful" 15 > /dev/null || {
+        echo "[gatt] ERROR: connection failed" >&2
+        wrish_gatt_close
+        return 1
+    }
+    wrish_gatt_wait "ServicesResolved: yes" 10 > /dev/null || {
+        echo "[gatt] WARNING: services may not be fully resolved" >&2
+    }
+
     # Enter GATT menu
     wrish_gatt_send "menu gatt"
-    sleep 1
+    sleep 0.5
 }
 
 # Send a command to the open GATT session
