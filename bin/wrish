@@ -13,7 +13,7 @@ set -e
 # @file_type: build-entrypoint
 # @build_type: bin
 # @build_with: Mush v0.2.0 (2026-03-21 develop)
-# @build_date: 2026-03-27T21:17:24Z
+# @build_date: 2026-03-27T21:26:02Z
 
 # @section_code: SC005
 # @section_name: functions
@@ -285,18 +285,25 @@ wrish_bluetooth_deep_read() {
     mapfile -t uuids <<< "$raw_attrs"
     echo "[deep-read] found ${#uuids[@]} attributes" >&2
 
-    # Step 2: one session — for each UUID: select, --, read, --, sleep
+    # Step 2: one session per UUID using three named sentinels:
+    #   --HEAD--  : before select-attribute (captures old prompt / context)
+    #   --START-- : after select-attribute, before read (captures new prompt / attr path)
+    #   --END--   : after read + sleep (captures the async value that arrives late)
+    #
+    # Real output order observed: read → second_sentinel → [VALUE] → next_select
+    # So value is collected between --START-- and --END--, after read completes.
     output=$(
         {
             echo "connect ${mac}"
             sleep 4
             echo "menu gatt"
             for uuid in "${uuids[@]}"; do
+                echo "--HEAD--"
                 echo "select-attribute ${uuid}"
-                echo "--"
+                echo "--START--"
                 echo "read"
-                echo "--"
                 sleep 1
+                echo "--END--"
             done
             echo "exit"
         } | bluetoothctl 2>&1
@@ -307,54 +314,48 @@ wrish_bluetooth_deep_read() {
         return 0
     fi
 
-    # Step 3: strip ANSI codes, then split on sentinel lines.
-    # In the GATT submenu, an unknown command like "--" produces:
-    #   "Invalid command in menu gatt: --"  (or "Unknown command: --" at top level)
-    # We match both forms as sentinels around each read's output.
-    stripped=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g')
-
-    idx=0
-    local sentinel_count
-    sentinel_count=0
-    local in_read=0
+    # Step 3: parse using HEAD/START/END sentinels.
+    # state=idle → HEAD sentinel → state=head (collect attr path from prompt)
+    #           → START sentinel → state=read (collect raw read output)
+    #           → END sentinel   → print result, state=idle
+    local state="idle"
+    local head_buf=""
     local read_buf=""
+    local attr_path=""
     local uuid_idx=0
 
     while IFS= read -r line; do
-        if echo "$line" | grep -qE "(Unknown|Invalid) command"; then
-            sentinel_count=$(( sentinel_count + 1 ))
-            if (( sentinel_count % 2 == 1 )); then
-                # odd sentinel = start of read block
-                in_read=1
-                read_buf=""
-            else
-                # even sentinel = end of read block
-                in_read=0
-                local current_uuid="${uuids[$uuid_idx]:-?}"
-                uuid_idx=$(( uuid_idx + 1 ))
-                # Print result for this UUID
-                local value
-                value=$(echo "$read_buf" | grep -oE 'Value: [0-9a-f ]+' | head -1 | sed 's/Value: //')
-                local read_err
-                read_err=$(echo "$read_buf" | grep -i 'failed\|error\|not permitted' | head -1 | sed 's/^[[:space:]]*//')
-                echo ""
-                echo "UUID: ${current_uuid}"
-                if [ -n "$value" ]; then
-                    echo "  Value (hex): ${value}"
-                    # Try ASCII decode
-                    local ascii
-                    ascii=$(echo "$value" | tr ' ' '\n' | while read -r h; do printf "\\x${h}"; done 2>/dev/null | tr -cd '[:print:]')
-                    [ -n "$ascii" ] && echo "  Value (ascii): ${ascii}"
-                elif [ -n "$read_err" ]; then
-                    echo "  Error: ${read_err}"
-                else
-                    echo "  (no value returned)"
-                fi
-            fi
-        elif [ "$in_read" -eq 1 ]; then
+        # Strip ANSI from this line for matching, but keep raw for buffers
+        local clean
+        clean=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g')
+
+        if echo "$clean" | grep -q "Invalid command.*--HEAD--\|Unknown command.*--HEAD--"; then
+            state="head"
+            head_buf=""
+            attr_path=""
+        elif echo "$clean" | grep -q "Invalid command.*--START--\|Unknown command.*--START--"; then
+            # Extract attribute path from last prompt line seen in head_buf
+            attr_path=$(printf '%s\n' "$head_buf" \
+                | grep -oE '\[C60-A82C:[^]]+\]' | tail -1 \
+                | tr -d '[]')
+            state="read"
+            read_buf=""
+        elif echo "$clean" | grep -q "Invalid command.*--END--\|Unknown command.*--END--"; then
+            state="idle"
+            local current_uuid="${uuids[$uuid_idx]:-?}"
+            uuid_idx=$(( uuid_idx + 1 ))
+            echo ""
+            echo "UUID: ${current_uuid}"
+            [ -n "$attr_path" ] && echo "Path: ${attr_path}"
+            echo "--START--"
+            printf '%s\n' "$read_buf"
+            echo "--END--"
+        elif [ "$state" = "head" ]; then
+            head_buf+="${line}"$'\n'
+        elif [ "$state" = "read" ]; then
             read_buf+="${line}"$'\n'
         fi
-    done <<< "$stripped"
+    done <<< "$output"
 }
 
 wrish_bluetooth_connect() {
