@@ -120,7 +120,20 @@ wrish_c60a82c_app_type() {
     esac
 }
 
-# Send a notification to the bracelet
+# Convert decimal byte array to bluetoothctl hex string "0xXX 0xXX ..."
+# Args: decimal byte values
+wrish_c60a82c_to_hex_str() {
+    local result
+    local b
+    result=""
+    for b in "$@"; do
+        [ -n "$result" ] && result+=" "
+        result+="$(printf '0x%02X' $(( b )))"
+    done
+    echo "$result"
+}
+
+# Send a notification to the bracelet using the GATT wrapper (with ACK handling)
 # Args: [--mac <mac>] [--app <app_name>] --title <title> --body <body>
 wrish_c60a82c_notify() {
     local mac
@@ -131,6 +144,9 @@ wrish_c60a82c_notify() {
     local msg_type_bytes
     local title_bytes
     local body_bytes
+    local hex_type
+    local hex_title
+    local hex_body
     mac="$C60_A82C_MAC"
     app_name="whatsapp"
     title=""
@@ -144,30 +160,58 @@ wrish_c60a82c_notify() {
             *) echo "Unknown option: $1" >&2; return 1 ;;
         esac
     done
+
+    echo "[notify] checking device info..." >&2
+    wrish_gatt_info "$mac"
+
     app_type=$(wrish_c60a82c_app_type "$app_name")
     read -ra msg_type_bytes <<< "$(wrish_c60a82c_build_set_message_type "$app_type")"
     read -ra title_bytes    <<< "$(wrish_c60a82c_build_set_message2 1 "$title")"
     read -ra body_bytes     <<< "$(wrish_c60a82c_build_set_message2 2 "$body")"
-    {
-        echo "connect ${mac}"
-        sleep 3
-        echo "menu gatt"
-        echo "select-attribute ${C60_A82C_UUID_NOTIFY}"
-        echo "notify on"
-        sleep 1
-        echo "select-attribute ${C60_A82C_UUID_WRITE}"
-        wrish_c60a82c_write_cmds "${msg_type_bytes[@]}"
-        sleep 2
-        wrish_c60a82c_write_cmds "${title_bytes[@]}"
-        sleep 2
-        wrish_c60a82c_write_cmds "${body_bytes[@]}"
-        sleep 2
-        echo 'write "0x0A 0x01 0x00 0x03 0x0E"'
-        sleep 2
-        echo "back"
-        echo "disconnect ${mac}"
-        echo "exit"
-    } | bluetoothctl
+
+    hex_type=$(wrish_c60a82c_to_hex_str "${msg_type_bytes[@]}")
+    hex_title=$(wrish_c60a82c_to_hex_str "${title_bytes[@]}")
+    hex_body=$(wrish_c60a82c_to_hex_str "${body_bytes[@]}")
+
+    wrish_gatt_open "$mac" || return 1
+
+    wrish_gatt_select "$C60_A82C_UUID_NOTIFY"
+    wrish_gatt_notify_on
+
+    wrish_gatt_select "$C60_A82C_UUID_WRITE"
+
+    echo "[notify] → setMessageType (${app_name})" >&2
+    wrish_gatt_write_wait_ack "$hex_type" 0
+
+    echo "[notify] → title" >&2
+    wrish_gatt_write_wait_ack "$hex_title" 1
+
+    echo "[notify] → body" >&2
+    # body may be split into chunks
+    local i
+    local n
+    local chunk_bytes
+    local chunk_hex
+    local chunk_size
+    chunk_size=20
+    i=0
+    n=${#body_bytes[@]}
+    while (( i < n )); do
+        chunk_bytes=("${body_bytes[@]:$i:$chunk_size}")
+        chunk_hex=$(wrish_c60a82c_to_hex_str "${chunk_bytes[@]}")
+        if (( i + chunk_size >= n )); then
+            wrish_gatt_write_wait_ack "$chunk_hex" 2
+        else
+            wrish_gatt_write_wait_ack "$chunk_hex"
+        fi
+        (( i += chunk_size ))
+    done
+
+    echo "[notify] → END_MESSAGE" >&2
+    wrish_gatt_write_wait_ack "0x0A 0x01 0x00 0x03 0x0E" 3
+
+    wrish_gatt_close
+    echo "[notify] done" >&2
 }
 
 # Subscribe to heart rate notifications (listens for 30 s by default)
