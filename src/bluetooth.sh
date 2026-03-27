@@ -1,5 +1,16 @@
 
 
+wrish_bluetooth_scan() {
+    rfkill unblock all
+    {
+        echo "scan on"
+        sleep "${1:-10}"
+        echo "scan off"
+        echo "devices"
+        echo "exit"
+    } | bluetoothctl | grep Device | awk '{print "[" $2 "] " $3}'
+}
+
 wrish_bluetooth_list() {
 
 
