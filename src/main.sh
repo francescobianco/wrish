@@ -63,6 +63,7 @@ main() {
               echo "  battery                   Read battery level"
               echo "  heart-rate [OPTIONS]      Monitor heart rate"
               echo "    --duration <secs>       Listen duration (default 30s)"
+              echo "  deep-read                 Read all GATT characteristics (raw dump)"
               echo ""
               echo "DEVICE:"
               echo "  ${WRISH_DEVICE} — ${WRISH_MAC}"
@@ -113,6 +114,9 @@ main() {
       heart-rate)
         shift
         wrish_router_heart_rate "$@"
+        ;;
+      deep-read)
+        wrish_bluetooth_deep_read "${WRISH_MAC}"
         ;;
       *)
         echo "Unknown command: $1. Run 'wrish --help' for usage." >&2
