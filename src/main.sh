@@ -1,10 +1,11 @@
 
 module bluetooth
+module c60_a82c
 
 main() {
 
-  WRISH_DEVICE=ID115
-  WRISH_MAC=BA:03:5C:0B:21:E1
+  WRISH_DEVICE=C60-A82C
+  WRISH_MAC=A4:C1:38:9A:A8:2C
 
   local list
   local info
@@ -58,6 +59,14 @@ main() {
         ;;
       login)
         mydev_login_host "$hosts" "$2"
+        ;;
+      notify)
+        shift
+        wrish_c60a82c_notify "$@"
+        ;;
+      heart-rate)
+        shift
+        wrish_c60a82c_heart_rate_monitor "$@"
         ;;
     esac
 
