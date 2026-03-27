@@ -13,7 +13,7 @@ set -e
 # @file_type: build-entrypoint
 # @build_type: bin
 # @build_with: Mush v0.2.0 (2026-03-21 develop)
-# @build_date: 2026-03-27T19:03:58Z
+# @build_date: 2026-03-27T19:43:08Z
 
 # @section_code: SC005
 # @section_name: functions
@@ -238,6 +238,10 @@ C60_A82C_MAC="A4:C1:38:9A:A8:2C"
 C60_A82C_UUID_WRITE="0000ff02-0000-1000-8000-00805f9b34fb"
 C60_A82C_UUID_NOTIFY="0000ff01-0000-1000-8000-00805f9b34fb"
 C60_A82C_UUID_HR="00002a37-0000-1000-8000-00805f9b34fb"
+C60_A82C_HANDLE_WRITE="0x0011"
+C60_A82C_HANDLE_NOTIFY_CCCD="0x000f"
+C60_A82C_HANDLE_HR="0x0014"
+C60_A82C_HANDLE_HR_CCCD="0x0015"
 
 # Compute frame checksum: ((sum_of_preceding_bytes * 0x56) + 0x5A) & 0xFF
 wrish_c60a82c_checksum() {
@@ -293,27 +297,32 @@ wrish_c60a82c_build_set_message2() {
     echo "${frame[*]} $chk"
 }
 
-# Output bluetoothctl write commands for a byte array, split into 20-byte chunks
-# Args: decimal byte values
-wrish_c60a82c_write_cmds() {
+# Write a byte array to the device via gatttool, split into 20-byte chunks
+# Args: <mac> <handle> decimal byte values...
+wrish_c60a82c_gatttool_write() {
+    local mac
+    local handle
     local bytes
     local chunk_size
     local i
     local n
     local chunk
-    local line
+    local hex
     local b
+    mac="$1"
+    handle="$2"
+    shift 2
     bytes=("$@")
     chunk_size=20
     i=0
     n=${#bytes[@]}
     while (( i < n )); do
         chunk=("${bytes[@]:$i:$chunk_size}")
-        line="write"
+        hex=""
         for b in "${chunk[@]}"; do
-            line+=" $(printf '0x%02X' $(( b )))"
+            hex+="$(printf '%02X' $(( b )))"
         done
-        echo "$line"
+        gatttool -b "$mac" --char-write-req -a "$handle" -n "$hex"
         (( i += chunk_size ))
     done
 }
@@ -355,9 +364,6 @@ wrish_c60a82c_notify() {
     local title
     local body
     local app_type
-    local msg_type_frame
-    local title_frame
-    local body_frame
     local msg_type_bytes
     local title_bytes
     local body_bytes
@@ -375,32 +381,17 @@ wrish_c60a82c_notify() {
         esac
     done
     app_type=$(wrish_c60a82c_app_type "$app_name")
-    msg_type_frame=$(wrish_c60a82c_build_set_message_type "$app_type")
-    title_frame=$(wrish_c60a82c_build_set_message2 1 "$title")
-    body_frame=$(wrish_c60a82c_build_set_message2 2 "$body")
-    read -ra msg_type_bytes <<< "$msg_type_frame"
-    read -ra title_bytes    <<< "$title_frame"
-    read -ra body_bytes     <<< "$body_frame"
-    {
-        echo "connect ${mac}"
-        sleep 3
-        echo "menu gatt"
-        echo "select-attribute ${C60_A82C_UUID_NOTIFY}"
-        echo "notify on"
-        sleep 1
-        echo "select-attribute ${C60_A82C_UUID_WRITE}"
-        wrish_c60a82c_write_cmds "${msg_type_bytes[@]}"
-        sleep 2
-        wrish_c60a82c_write_cmds "${title_bytes[@]}"
-        sleep 2
-        wrish_c60a82c_write_cmds "${body_bytes[@]}"
-        sleep 2
-        echo "write 0x0A 0x01 0x00 0x03 0x0E"
-        sleep 2
-        echo "back"
-        echo "disconnect ${mac}"
-        echo "exit"
-    } | bluetoothctl
+    read -ra msg_type_bytes <<< "$(wrish_c60a82c_build_set_message_type "$app_type")"
+    read -ra title_bytes    <<< "$(wrish_c60a82c_build_set_message2 1 "$title")"
+    read -ra body_bytes     <<< "$(wrish_c60a82c_build_set_message2 2 "$body")"
+    gatttool -b "$mac" --char-write-req -a "$C60_A82C_HANDLE_NOTIFY_CCCD" -n 0100
+    wrish_c60a82c_gatttool_write "$mac" "$C60_A82C_HANDLE_WRITE" "${msg_type_bytes[@]}"
+    sleep 1
+    wrish_c60a82c_gatttool_write "$mac" "$C60_A82C_HANDLE_WRITE" "${title_bytes[@]}"
+    sleep 1
+    wrish_c60a82c_gatttool_write "$mac" "$C60_A82C_HANDLE_WRITE" "${body_bytes[@]}"
+    sleep 1
+    gatttool -b "$mac" --char-write-req -a "$C60_A82C_HANDLE_WRITE" -n 0A0100030E
 }
 
 # Subscribe to heart rate notifications (listens for 30 s by default)
@@ -417,17 +408,13 @@ wrish_c60a82c_heart_rate_monitor() {
             *) echo "Unknown option: $1" >&2; return 1 ;;
         esac
     done
-    {
-        echo "connect ${mac}"
-        sleep 3
-        echo "menu gatt"
-        echo "select-attribute ${C60_A82C_UUID_HR}"
-        echo "notify on"
-        sleep "$duration"
-        echo "back"
-        echo "disconnect ${mac}"
-        echo "exit"
-    } | bluetoothctl
+    gatttool -b "$mac" --char-write-req -a "$C60_A82C_HANDLE_HR_CCCD" -n 0100
+    gatttool -b "$mac" --listen -a "$C60_A82C_HANDLE_HR" --timeout "$duration" 2>&1 | \
+        grep -oP '(?<=value: )[\da-f ]+' | while read -r raw; do
+            local val
+            val=$(( 16#$(echo "$raw" | awk '{print $2}') ))
+            echo "Heart rate: ${val} bpm"
+        done
 }
 # @section_code: SC006
 # @section_name: entrypoint
