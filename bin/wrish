@@ -13,7 +13,7 @@ set -e
 # @file_type: build-entrypoint
 # @build_type: bin
 # @build_with: Mush v0.2.0 (2026-03-21 develop)
-# @build_date: 2026-03-27T20:45:23Z
+# @build_date: 2026-03-27T20:57:21Z
 
 # @section_code: SC005
 # @section_name: functions
@@ -92,6 +92,7 @@ main() {
               echo "    --app <name>            App type (whatsapp, telegram, instagram, ...)"
               echo "    --title <text>          Notification title (max 32 chars)"
               echo "    --body <text>           Notification body (max 128 chars)"
+              echo "  battery                   Read battery level"
               echo "  heart-rate [OPTIONS]      Monitor heart rate"
               echo "    --duration <secs>       Listen duration (default 30s)"
               echo ""
@@ -137,6 +138,9 @@ main() {
       notify)
         shift
         wrish_router_notify "$@"
+        ;;
+      battery)
+        wrish_router_battery
         ;;
       heart-rate)
         shift
@@ -274,19 +278,20 @@ wrist_bluetooth_power() {
 
 module gatt
 
-# Global coproc file descriptors for the active GATT session
-WRISH_GATT_FD_IN=""
-WRISH_GATT_FD_OUT=""
+# Internal session state — one active session at a time
+WRISH_GATT_FIFO=""
+WRISH_GATT_LOG=""
 WRISH_GATT_PID=""
+WRISH_GATT_CMD_FD=""
+WRISH_GATT_LOG_POS=0
 
-# Ensure device is connected, with power cycle + retry if needed
-# Args: <mac>
+# Ensure device is connected; reconnect with power cycle if needed. Args: <mac>
 wrish_gatt_ensure_connected() {
     local mac
     local connected
     mac="$1"
 
-    connected=$(echo -e "info ${mac}\nexit" | bluetoothctl | grep "Connected: yes")
+    connected=$(echo -e "info ${mac}\nexit" | bluetoothctl 2>/dev/null | grep "Connected: yes")
     if [ -n "$connected" ]; then
         return 0
     fi
@@ -304,74 +309,88 @@ wrish_gatt_ensure_connected() {
         echo "exit"
     } | bluetoothctl > /dev/null 2>&1
 
-    connected=$(echo -e "info ${mac}\nexit" | bluetoothctl | grep "Connected: yes")
+    connected=$(echo -e "info ${mac}\nexit" | bluetoothctl 2>/dev/null | grep "Connected: yes")
     if [ -z "$connected" ]; then
         echo "[gatt] ERROR: could not connect to ${mac}" >&2
         return 1
     fi
-
     echo "[gatt] connected to ${mac}" >&2
 }
 
-# Open a persistent GATT session to a device
-# Waits for "Connection successful" and "ServicesResolved: yes" before returning
-# Args: <mac>
+# Open a GATT session: bluetoothctl reads from a FIFO, writes to a log file.
+# Connects to device, waits for ServicesResolved, enters GATT menu. Args: <mac>
 wrish_gatt_open() {
     local mac
     mac="$1"
 
-    # Launch bluetoothctl as a coproc
-    coproc WRISH_BT { bluetoothctl 2>&1; }
-    WRISH_GATT_PID=$WRISH_BT_PID
-    WRISH_GATT_FD_IN=${WRISH_BT[1]}
-    WRISH_GATT_FD_OUT=${WRISH_BT[0]}
+    WRISH_GATT_FIFO=$(mktemp -u /tmp/wrish-gatt-in-XXXXXX)
+    WRISH_GATT_LOG=$(mktemp /tmp/wrish-gatt-out-XXXXXX)
+    WRISH_GATT_LOG_POS=0
 
-    # Connect and wait for services to be resolved
-    wrish_gatt_send "connect $mac"
-    wrish_gatt_wait "Connection successful" 15 > /dev/null || {
+    mkfifo "$WRISH_GATT_FIFO"
+
+    # Launch bluetoothctl: reads commands from FIFO, appends output to log
+    bluetoothctl < "$WRISH_GATT_FIFO" >> "$WRISH_GATT_LOG" 2>&1 &
+    WRISH_GATT_PID=$!
+
+    # Open the FIFO for writing (keeps it open so bluetoothctl doesn't see EOF)
+    exec {WRISH_GATT_CMD_FD}>"$WRISH_GATT_FIFO"
+
+    # Connect and wait for connection + service resolution
+    wrish_gatt_send "connect ${mac}"
+    wrish_gatt_wait_log "Connection successful" 15 || {
         echo "[gatt] ERROR: connection failed" >&2
         wrish_gatt_close
         return 1
     }
-    wrish_gatt_wait "ServicesResolved: yes" 10 > /dev/null || {
+    wrish_gatt_wait_log "ServicesResolved: yes" 10 || {
         echo "[gatt] WARNING: services may not be fully resolved" >&2
     }
 
-    # Enter GATT menu
     wrish_gatt_send "menu gatt"
     sleep 0.5
 }
 
 # Send a command to the open GATT session
-# Args: <command>
 wrish_gatt_send() {
-    echo "$1" >&"${WRISH_GATT_FD_IN}"
+    echo "$1" >&"${WRISH_GATT_CMD_FD}"
 }
 
-# Read session output until pattern matches or timeout expires
-# Prints all lines seen. Returns 0 on match, 1 on timeout.
+# Read new lines appended to the log since last call.
+# Prints them and returns 0 if <pattern> found, 1 if timeout.
 # Args: <pattern> [timeout_seconds=10]
-wrish_gatt_wait() {
+wrish_gatt_wait_log() {
     local pattern
     local timeout
-    local line
+    local deadline
+    local new_content
     pattern="$1"
     timeout="${2:-10}"
+    deadline=$(( $(date +%s) + timeout ))
 
-    while IFS= read -r -t "$timeout" line <&"${WRISH_GATT_FD_OUT}"; do
-        echo "$line"
-        if echo "$line" | grep -qP "$pattern"; then
-            return 0
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        new_content=$(tail -c +$(( WRISH_GATT_LOG_POS + 1 )) "$WRISH_GATT_LOG" 2>/dev/null)
+        if [ -n "$new_content" ]; then
+            WRISH_GATT_LOG_POS=$(wc -c < "$WRISH_GATT_LOG")
+            echo "$new_content"
+            if echo "$new_content" | grep -qP "$pattern"; then
+                return 0
+            fi
         fi
+        sleep 0.2
     done
     return 1
 }
 
+# Alias for use inside notify/battery functions
+wrish_gatt_wait() {
+    wrish_gatt_wait_log "$@"
+}
+
 # Select a GATT attribute by UUID
-# Args: <uuid>
 wrish_gatt_select() {
     wrish_gatt_send "select-attribute $1"
-    sleep 0.5
+    sleep 0.3
 }
 
 # Enable notifications on the currently selected attribute
@@ -380,10 +399,9 @@ wrish_gatt_notify_on() {
     sleep 0.5
 }
 
-# Write hex bytes to the currently selected attribute and wait for ACK on FF01
-# ACK pattern: line containing Value: followed by 8A at start
-# Args: <hex_string>  e.g. "0x0A 0x02 0x00 0x00 0x07 0xBC"
-# Optional second arg: ACK stage byte to wait for (0=type, 1=title, 2=body, 3=end)
+# Write hex string to current attribute and optionally wait for ACK on FF01.
+# ACK pattern: line containing "Value:" followed by "8a" and the stage byte.
+# Args: <hex_string> [ack_stage]  (ack_stage: 0=type, 1=title, 2=body, 3=end)
 wrish_gatt_write_wait_ack() {
     local hex
     local stage
@@ -391,34 +409,43 @@ wrish_gatt_write_wait_ack() {
     hex="$1"
     stage="${2:-}"
 
-    wrish_gatt_send "write \"${hex}\""
+    wrish_gatt_send "write \"${hex}\" 0 command"
 
     if [ -n "$stage" ]; then
-        # ACK lines look like: [CHG] Attribute ... Value: 8a 02 00 NN ...
         ack_pattern="Value:.*8a.*0${stage}"
-        wrish_gatt_wait "$ack_pattern" 10
+        wrish_gatt_wait_log "$ack_pattern" 10 > /dev/null || {
+            echo "[gatt] WARNING: no ACK for stage ${stage}, continuing" >&2
+        }
     else
         sleep 1
     fi
 }
 
-# Close the GATT session
-wrish_gatt_close() {
-    wrish_gatt_send "back"
-    sleep 0.3
-    wrish_gatt_send "exit"
-    wait "$WRISH_GATT_PID" 2>/dev/null
-    WRISH_GATT_PID=""
-    WRISH_GATT_FD_IN=""
-    WRISH_GATT_FD_OUT=""
-}
-
-# Show device info and verify connection
-# Args: <mac>
+# Show basic device info via bluetoothctl (no session needed)
 wrish_gatt_info() {
     local mac
     mac="$1"
-    echo -e "info ${mac}\nexit" | bluetoothctl | grep -E '(Name|Connected|Paired|Trusted|RSSI)'
+    echo -e "info ${mac}\nexit" | bluetoothctl 2>/dev/null \
+        | grep -E '^\s+(Name|Connected|Paired|Trusted|RSSI)' \
+        | sed 's/^\s*//'
+}
+
+# Close the GATT session and clean up
+wrish_gatt_close() {
+    if [ -n "$WRISH_GATT_CMD_FD" ]; then
+        wrish_gatt_send "back" 2>/dev/null || true
+        sleep 0.2
+        wrish_gatt_send "exit" 2>/dev/null || true
+        exec {WRISH_GATT_CMD_FD}>&-
+    fi
+    [ -n "$WRISH_GATT_PID" ] && wait "$WRISH_GATT_PID" 2>/dev/null || true
+    [ -n "$WRISH_GATT_FIFO" ] && rm -f "$WRISH_GATT_FIFO"
+    [ -n "$WRISH_GATT_LOG" ]  && rm -f "$WRISH_GATT_LOG"
+    WRISH_GATT_FIFO=""
+    WRISH_GATT_LOG=""
+    WRISH_GATT_PID=""
+    WRISH_GATT_CMD_FD=""
+    WRISH_GATT_LOG_POS=0
 }
 
 # @section_code: SC007
@@ -441,7 +468,6 @@ module c60_a82c
 C60_A82C_UUID_WRITE="0000ff02-0000-1000-8000-00805f9b34fb"
 C60_A82C_UUID_NOTIFY="0000ff01-0000-1000-8000-00805f9b34fb"
 C60_A82C_UUID_HR="00002a37-0000-1000-8000-00805f9b34fb"
-C60_A82C_UUID_DEVICE_NAME="00002a00-0000-1000-8000-00805f9b34fb"
 
 # Compute frame checksum: ((sum_of_preceding_bytes * 0x56) + 0x5A) & 0xFF
 wrish_c60a82c_checksum() {
@@ -454,20 +480,16 @@ wrish_c60a82c_checksum() {
     printf '%d' $(( ((sum * 0x56) + 0x5A) & 0xFF ))
 }
 
-# Output space-separated decimal bytes for setMessageType frame
-# Args: <app_type_decimal>
+# Build setMessageType frame. Args: <app_type_decimal>
 wrish_c60a82c_build_set_message_type() {
-    local app_type
     local bytes
     local chk
-    app_type="$1"
-    bytes=(10 2 0 0 "$app_type")
+    bytes=(10 2 0 0 "$1")
     chk=$(wrish_c60a82c_checksum "${bytes[@]}")
     echo "${bytes[*]} $chk"
 }
 
-# Output space-separated decimal bytes for setMessage2 frame (title or body)
-# Args: <kind> <text>  — kind=1 for title (max 32 bytes), kind=2 for body (max 128 bytes)
+# Build setMessage2 frame. Args: <kind> <text>  (kind=1 title, kind=2 body)
 wrish_c60a82c_build_set_message2() {
     local kind
     local text
@@ -497,7 +519,19 @@ wrish_c60a82c_build_set_message2() {
     echo "${frame[*]} $chk"
 }
 
-# Map app name (case-insensitive) to bracelet app type code
+# Convert decimal byte array to bluetoothctl quoted hex string "0xXX 0xXX ..."
+wrish_c60a82c_to_hex_str() {
+    local result
+    local b
+    result=""
+    for b in "$@"; do
+        [ -n "$result" ] && result+=" "
+        result+="$(printf '0x%02X' $(( b )))"
+    done
+    echo "$result"
+}
+
+# Map app name to bracelet app type code
 wrish_c60a82c_app_type() {
     case "${1,,}" in
         wechat)      echo 2  ;;
@@ -526,43 +560,74 @@ wrish_c60a82c_app_type() {
     esac
 }
 
-# Read device info including name from GATT 0x2A00 (via BlueZ Device1.Name)
-# Args: <mac>
+# Read device info (requires connection). Args: <mac>
 wrish_c60a82c_info() {
     local mac
     mac="${1:-${WRISH_MAC}}"
 
-    python3 - "$mac" << 'EOF'
-import sys, dbus
+    wrish_gatt_ensure_connected "$mac" || return 1
 
-mac = sys.argv[1]
-mac_path = mac.replace(":", "_")
-dev_path = f"/org/bluez/hci0/dev_{mac_path}"
-
-bus = dbus.SystemBus()
-dev = bus.get_object("org.bluez", dev_path)
-props = dbus.Interface(dev, "org.freedesktop.DBus.Properties")
-
-def get(key, default="n/a"):
-    try: return str(props.Get("org.bluez.Device1", key))
-    except: return default
-
-name      = get("Name")
-connected = get("Connected")
-paired    = get("Paired")
-trusted   = get("Trusted")
-rssi      = get("RSSI")
-
-print(f"MAC:              {mac}")
-print(f"Device Name (0x2A00): {name}")
-print(f"Connected:        {connected}")
-print(f"Paired:           {paired}")
-print(f"Trusted:          {trusted}")
-print(f"RSSI:             {rssi}")
-EOF
+    echo -e "info ${mac}\nexit" | bluetoothctl 2>/dev/null \
+        | grep -E '^\s+(Name|Alias|Connected|Paired|Trusted|RSSI)' \
+        | sed 's/^\s*//' \
+        | awk -F': ' '
+            /^Name/      { printf "Device Name (0x2A00): %s\n", $2 }
+            /^Alias/     { next }
+            /^Connected/ { printf "Connected:            %s\n", $2 }
+            /^Paired/    { printf "Paired:               %s\n", $2 }
+            /^Trusted/   { printf "Trusted:              %s\n", $2 }
+            /^RSSI/      { printf "RSSI:                 %s\n", $2 }
+        '
 }
 
-# Send a notification to the bracelet via D-Bus (with ACK handshake on FF01)
+# Read battery level via vendor command on FF02, response on FF01.
+# The C60-A82C responds to command 0x03 0x01 0x00 0x00 <ck> with battery % in byte[4].
+# Args: [--mac <mac>]
+wrish_c60a82c_battery() {
+    local mac
+    mac="${WRISH_MAC}"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --mac) mac="$2"; shift 2 ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    wrish_gatt_open "$mac" || return 1
+
+    wrish_gatt_select "$C60_A82C_UUID_NOTIFY"
+    wrish_gatt_notify_on
+
+    wrish_gatt_select "$C60_A82C_UUID_WRITE"
+
+    # Battery query command: 03 01 00 00 <checksum>
+    # checksum([3,1,0,0]) = ((4*0x56)+0x5A)&0xFF = 0xB2
+    wrish_gatt_send 'write "0x03 0x01 0x00 0x00 0xB2" 0 command'
+
+    # Response on FF01: 83 02 00 <battery%> ...  (common pattern for keephealth devices)
+    local response
+    response=$(wrish_gatt_wait 'Value:' 8)
+
+    wrish_gatt_close
+
+    if [ -n "$response" ]; then
+        # Extract the value bytes from the CHG line
+        local value_hex
+        value_hex=$(echo "$response" | grep -oP 'Value: \K[\da-f ]+' | head -1)
+        echo "Battery response: ${value_hex}"
+        # Battery % is typically in byte index 3 (0-indexed) for keephealth protocol
+        local battery
+        battery=$(echo "$value_hex" | awk '{print strtonum("0x" $4)}')
+        if [ -n "$battery" ] && [ "$battery" -gt 0 ] 2>/dev/null; then
+            echo "Battery: ${battery}%"
+        fi
+    else
+        echo "No response from device for battery query" >&2
+        return 1
+    fi
+}
+
+# Send a notification to the bracelet via GATT coproc session with ACK waiting.
 # Args: [--mac <mac>] [--app <name>] --title <text> --body <text>
 wrish_c60a82c_notify() {
     local mac
@@ -584,12 +649,59 @@ wrish_c60a82c_notify() {
         esac
     done
 
-    python3 "${WRISH_NOTIFY_PY:-$(dirname "$(readlink -f "$0")")/notify.py}" \
-        --mac "$mac" --app "$app_name" --title "$title" --body "$body"
+    local app_type
+    local msg_type_bytes
+    local title_bytes
+    local body_bytes
+    local hex
+
+    app_type=$(wrish_c60a82c_app_type "$app_name")
+    read -ra msg_type_bytes <<< "$(wrish_c60a82c_build_set_message_type "$app_type")"
+    read -ra title_bytes    <<< "$(wrish_c60a82c_build_set_message2 1 "$title")"
+    read -ra body_bytes     <<< "$(wrish_c60a82c_build_set_message2 2 "$body")"
+
+    wrish_gatt_open "$mac" || return 1
+
+    wrish_gatt_select "$C60_A82C_UUID_NOTIFY"
+    wrish_gatt_notify_on
+    wrish_gatt_select "$C60_A82C_UUID_WRITE"
+
+    # Stage 0: setMessageType — wait for ACK 8A xx xx 00 xx xx
+    hex=$(wrish_c60a82c_to_hex_str "${msg_type_bytes[@]}")
+    echo "[notify] setMessageType (${app_name})" >&2
+    wrish_gatt_write_wait_ack "$hex" 0
+
+    # Stage 1: title
+    hex=$(wrish_c60a82c_to_hex_str "${title_bytes[@]}")
+    echo "[notify] title" >&2
+    wrish_gatt_write_wait_ack "$hex" 1
+
+    # Stage 2: body (may span multiple 20-byte chunks)
+    echo "[notify] body" >&2
+    local i n chunk_bytes chunk_hex chunk_size
+    chunk_size=20
+    i=0
+    n=${#body_bytes[@]}
+    while (( i < n )); do
+        chunk_bytes=("${body_bytes[@]:$i:$chunk_size}")
+        chunk_hex=$(wrish_c60a82c_to_hex_str "${chunk_bytes[@]}")
+        if (( i + chunk_size >= n )); then
+            wrish_gatt_write_wait_ack "$chunk_hex" 2
+        else
+            wrish_gatt_write_wait_ack "$chunk_hex"
+        fi
+        (( i += chunk_size ))
+    done
+
+    # Stage 3: END_MESSAGE
+    echo "[notify] END_MESSAGE" >&2
+    wrish_gatt_write_wait_ack "0x0A 0x01 0x00 0x03 0x0E" 3
+
+    wrish_gatt_close
+    echo "[notify] done" >&2
 }
 
-# Subscribe to heart rate notifications (listens for 30 s by default)
-# Args: [--mac <mac>] [--duration <seconds>]
+# Subscribe to heart rate notifications. Args: [--mac <mac>] [--duration <secs>]
 wrish_c60a82c_heart_rate_monitor() {
     local mac
     local duration
@@ -604,17 +716,15 @@ wrish_c60a82c_heart_rate_monitor() {
         esac
     done
 
-    {
-        echo "connect ${mac}"
-        sleep 3
-        echo "menu gatt"
-        echo "select-attribute ${C60_A82C_UUID_HR}"
-        echo "notify on"
-        sleep "$duration"
-        echo "back"
-        echo "disconnect ${mac}"
-        echo "exit"
-    } | bluetoothctl
+    wrish_gatt_open "$mac" || return 1
+    wrish_gatt_select "$C60_A82C_UUID_HR"
+    wrish_gatt_notify_on
+    wrish_gatt_wait 'Value:' "$duration" | grep -oP 'Value: \K[\da-f ]+' | while read -r raw; do
+        local bpm
+        bpm=$(printf '%d' "0x$(echo "$raw" | awk '{print $2}')" 2>/dev/null) || continue
+        echo "Heart rate: ${bpm} bpm"
+    done
+    wrish_gatt_close
 }
 
 # @section_code: SC007
@@ -645,6 +755,14 @@ wrish_router_notify() {
 wrish_router_heart_rate() {
     case "${WRISH_DEVICE}" in
         C60-A82C) wrish_c60a82c_heart_rate_monitor "$@" ;;
+        *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
+    esac
+}
+
+# Route 'battery' to the correct device handler
+wrish_router_battery() {
+    case "${WRISH_DEVICE}" in
+        C60-A82C) wrish_c60a82c_battery "$@" ;;
         *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
     esac
 }

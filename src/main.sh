@@ -60,6 +60,7 @@ main() {
               echo "    --app <name>            App type (whatsapp, telegram, instagram, ...)"
               echo "    --title <text>          Notification title (max 32 chars)"
               echo "    --body <text>           Notification body (max 128 chars)"
+              echo "  battery                   Read battery level"
               echo "  heart-rate [OPTIONS]      Monitor heart rate"
               echo "    --duration <secs>       Listen duration (default 30s)"
               echo ""
@@ -105,6 +106,9 @@ main() {
       notify)
         shift
         wrish_router_notify "$@"
+        ;;
+      battery)
+        wrish_router_battery
         ;;
       heart-rate)
         shift

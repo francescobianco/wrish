@@ -1,19 +1,20 @@
 
 module gatt
 
-# Global coproc file descriptors for the active GATT session
-WRISH_GATT_FD_IN=""
-WRISH_GATT_FD_OUT=""
+# Internal session state — one active session at a time
+WRISH_GATT_FIFO=""
+WRISH_GATT_LOG=""
 WRISH_GATT_PID=""
+WRISH_GATT_CMD_FD=""
+WRISH_GATT_LOG_POS=0
 
-# Ensure device is connected, with power cycle + retry if needed
-# Args: <mac>
+# Ensure device is connected; reconnect with power cycle if needed. Args: <mac>
 wrish_gatt_ensure_connected() {
     local mac
     local connected
     mac="$1"
 
-    connected=$(echo -e "info ${mac}\nexit" | bluetoothctl | grep "Connected: yes")
+    connected=$(echo -e "info ${mac}\nexit" | bluetoothctl 2>/dev/null | grep "Connected: yes")
     if [ -n "$connected" ]; then
         return 0
     fi
@@ -31,74 +32,88 @@ wrish_gatt_ensure_connected() {
         echo "exit"
     } | bluetoothctl > /dev/null 2>&1
 
-    connected=$(echo -e "info ${mac}\nexit" | bluetoothctl | grep "Connected: yes")
+    connected=$(echo -e "info ${mac}\nexit" | bluetoothctl 2>/dev/null | grep "Connected: yes")
     if [ -z "$connected" ]; then
         echo "[gatt] ERROR: could not connect to ${mac}" >&2
         return 1
     fi
-
     echo "[gatt] connected to ${mac}" >&2
 }
 
-# Open a persistent GATT session to a device
-# Waits for "Connection successful" and "ServicesResolved: yes" before returning
-# Args: <mac>
+# Open a GATT session: bluetoothctl reads from a FIFO, writes to a log file.
+# Connects to device, waits for ServicesResolved, enters GATT menu. Args: <mac>
 wrish_gatt_open() {
     local mac
     mac="$1"
 
-    # Launch bluetoothctl as a coproc
-    coproc WRISH_BT { bluetoothctl 2>&1; }
-    WRISH_GATT_PID=$WRISH_BT_PID
-    WRISH_GATT_FD_IN=${WRISH_BT[1]}
-    WRISH_GATT_FD_OUT=${WRISH_BT[0]}
+    WRISH_GATT_FIFO=$(mktemp -u /tmp/wrish-gatt-in-XXXXXX)
+    WRISH_GATT_LOG=$(mktemp /tmp/wrish-gatt-out-XXXXXX)
+    WRISH_GATT_LOG_POS=0
 
-    # Connect and wait for services to be resolved
-    wrish_gatt_send "connect $mac"
-    wrish_gatt_wait "Connection successful" 15 > /dev/null || {
+    mkfifo "$WRISH_GATT_FIFO"
+
+    # Launch bluetoothctl: reads commands from FIFO, appends output to log
+    bluetoothctl < "$WRISH_GATT_FIFO" >> "$WRISH_GATT_LOG" 2>&1 &
+    WRISH_GATT_PID=$!
+
+    # Open the FIFO for writing (keeps it open so bluetoothctl doesn't see EOF)
+    exec {WRISH_GATT_CMD_FD}>"$WRISH_GATT_FIFO"
+
+    # Connect and wait for connection + service resolution
+    wrish_gatt_send "connect ${mac}"
+    wrish_gatt_wait_log "Connection successful" 15 || {
         echo "[gatt] ERROR: connection failed" >&2
         wrish_gatt_close
         return 1
     }
-    wrish_gatt_wait "ServicesResolved: yes" 10 > /dev/null || {
+    wrish_gatt_wait_log "ServicesResolved: yes" 10 || {
         echo "[gatt] WARNING: services may not be fully resolved" >&2
     }
 
-    # Enter GATT menu
     wrish_gatt_send "menu gatt"
     sleep 0.5
 }
 
 # Send a command to the open GATT session
-# Args: <command>
 wrish_gatt_send() {
-    echo "$1" >&"${WRISH_GATT_FD_IN}"
+    echo "$1" >&"${WRISH_GATT_CMD_FD}"
 }
 
-# Read session output until pattern matches or timeout expires
-# Prints all lines seen. Returns 0 on match, 1 on timeout.
+# Read new lines appended to the log since last call.
+# Prints them and returns 0 if <pattern> found, 1 if timeout.
 # Args: <pattern> [timeout_seconds=10]
-wrish_gatt_wait() {
+wrish_gatt_wait_log() {
     local pattern
     local timeout
-    local line
+    local deadline
+    local new_content
     pattern="$1"
     timeout="${2:-10}"
+    deadline=$(( $(date +%s) + timeout ))
 
-    while IFS= read -r -t "$timeout" line <&"${WRISH_GATT_FD_OUT}"; do
-        echo "$line"
-        if echo "$line" | grep -qP "$pattern"; then
-            return 0
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        new_content=$(tail -c +$(( WRISH_GATT_LOG_POS + 1 )) "$WRISH_GATT_LOG" 2>/dev/null)
+        if [ -n "$new_content" ]; then
+            WRISH_GATT_LOG_POS=$(wc -c < "$WRISH_GATT_LOG")
+            echo "$new_content"
+            if echo "$new_content" | grep -qP "$pattern"; then
+                return 0
+            fi
         fi
+        sleep 0.2
     done
     return 1
 }
 
+# Alias for use inside notify/battery functions
+wrish_gatt_wait() {
+    wrish_gatt_wait_log "$@"
+}
+
 # Select a GATT attribute by UUID
-# Args: <uuid>
 wrish_gatt_select() {
     wrish_gatt_send "select-attribute $1"
-    sleep 0.5
+    sleep 0.3
 }
 
 # Enable notifications on the currently selected attribute
@@ -107,10 +122,9 @@ wrish_gatt_notify_on() {
     sleep 0.5
 }
 
-# Write hex bytes to the currently selected attribute and wait for ACK on FF01
-# ACK pattern: line containing Value: followed by 8A at start
-# Args: <hex_string>  e.g. "0x0A 0x02 0x00 0x00 0x07 0xBC"
-# Optional second arg: ACK stage byte to wait for (0=type, 1=title, 2=body, 3=end)
+# Write hex string to current attribute and optionally wait for ACK on FF01.
+# ACK pattern: line containing "Value:" followed by "8a" and the stage byte.
+# Args: <hex_string> [ack_stage]  (ack_stage: 0=type, 1=title, 2=body, 3=end)
 wrish_gatt_write_wait_ack() {
     local hex
     local stage
@@ -118,32 +132,41 @@ wrish_gatt_write_wait_ack() {
     hex="$1"
     stage="${2:-}"
 
-    wrish_gatt_send "write \"${hex}\""
+    wrish_gatt_send "write \"${hex}\" 0 command"
 
     if [ -n "$stage" ]; then
-        # ACK lines look like: [CHG] Attribute ... Value: 8a 02 00 NN ...
         ack_pattern="Value:.*8a.*0${stage}"
-        wrish_gatt_wait "$ack_pattern" 10
+        wrish_gatt_wait_log "$ack_pattern" 10 > /dev/null || {
+            echo "[gatt] WARNING: no ACK for stage ${stage}, continuing" >&2
+        }
     else
         sleep 1
     fi
 }
 
-# Close the GATT session
-wrish_gatt_close() {
-    wrish_gatt_send "back"
-    sleep 0.3
-    wrish_gatt_send "exit"
-    wait "$WRISH_GATT_PID" 2>/dev/null
-    WRISH_GATT_PID=""
-    WRISH_GATT_FD_IN=""
-    WRISH_GATT_FD_OUT=""
-}
-
-# Show device info and verify connection
-# Args: <mac>
+# Show basic device info via bluetoothctl (no session needed)
 wrish_gatt_info() {
     local mac
     mac="$1"
-    echo -e "info ${mac}\nexit" | bluetoothctl | grep -E '(Name|Connected|Paired|Trusted|RSSI)'
+    echo -e "info ${mac}\nexit" | bluetoothctl 2>/dev/null \
+        | grep -E '^\s+(Name|Connected|Paired|Trusted|RSSI)' \
+        | sed 's/^\s*//'
+}
+
+# Close the GATT session and clean up
+wrish_gatt_close() {
+    if [ -n "$WRISH_GATT_CMD_FD" ]; then
+        wrish_gatt_send "back" 2>/dev/null || true
+        sleep 0.2
+        wrish_gatt_send "exit" 2>/dev/null || true
+        exec {WRISH_GATT_CMD_FD}>&-
+    fi
+    [ -n "$WRISH_GATT_PID" ] && wait "$WRISH_GATT_PID" 2>/dev/null || true
+    [ -n "$WRISH_GATT_FIFO" ] && rm -f "$WRISH_GATT_FIFO"
+    [ -n "$WRISH_GATT_LOG" ]  && rm -f "$WRISH_GATT_LOG"
+    WRISH_GATT_FIFO=""
+    WRISH_GATT_LOG=""
+    WRISH_GATT_PID=""
+    WRISH_GATT_CMD_FD=""
+    WRISH_GATT_LOG_POS=0
 }

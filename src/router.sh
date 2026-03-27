@@ -24,3 +24,11 @@ wrish_router_heart_rate() {
         *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
     esac
 }
+
+# Route 'battery' to the correct device handler
+wrish_router_battery() {
+    case "${WRISH_DEVICE}" in
+        C60-A82C) wrish_c60a82c_battery "$@" ;;
+        *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
+    esac
+}
