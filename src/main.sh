@@ -2,6 +2,7 @@
 module bluetooth
 module gatt
 module gatttool
+module utils
 module devices
 module router
 

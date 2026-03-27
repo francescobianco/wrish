@@ -1,192 +1,56 @@
 
-UUID: 00010203-0405-0607-0809-0a0b0c0d1912
-Path: C60-A82C:/service0016
+UUID: 00002a00-0000-1000-8000-00805f9b34fb
 --START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service0016][0m# read
-Unable to read attribute /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0016
-[0;94m[C60-A82C:/service0016][0m# --END--
+[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> char-read-uuid 00002a00-0000-1000-8000-00805f9b34fb
 
 --END--
 
-UUID: 00010203-0405-0607-0809-0a0b0c0d2b12
-Path: C60-A82C:/service0016/char0017
+UUID: 00002a01-0000-1000-8000-00805f9b34fb
 --START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service0016/char0017][0m# read
-Attempting to read /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0016/char0017
-[0;94m[C60-A82C:/service0016/char0017][0m# [[0;93mCHG[0m] Attribute /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0016/char0017 Value:
-[0;94m[C60-A82C:/service0016/char0017][0m#   00                                               .               
-[0;94m[C60-A82C:/service0016/char0017][0m#   00                                               .               
-[0;94m[C60-A82C:/service0016/char0017][0m# --END--
+[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> char-read-uuid 00002a01-0000-1000-8000-00805f9b34fb
+[?2004l[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> [Khandle: 0x0003 	 value: 43 36 30 2d 41 38 32 43 00 00 00 00 00 00 00 00 00 00 
+[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> [Khandle: 0x0005 	 value: 00 00 
 
 --END--
 
-UUID: 00002901-0000-1000-8000-00805f9b34fb
-Path: C60-A82C:/service0016/char0017/desc0019
+UUID: 00002a04-0000-1000-8000-00805f9b34fb
 --START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service0016/char0017/desc0019][0m# read
-Attempting to read /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0016/char0017/desc0019
-[0;94m[C60-A82C:/service0016/char0017/desc0019][0m# --END--
-
---END--
-
-UUID: 0000180d-0000-1000-8000-00805f9b34fb
-Path: C60-A82C:/service0012
---START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service0012][0m# read
-Unable to read attribute /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0012
-[0;94m[C60-A82C:/service0012][0m#   4f 54 41                                         OTA             
-[0;94m[C60-A82C:/service0012][0m# --END--
-
---END--
-
-UUID: 00002a37-0000-1000-8000-00805f9b34fb
-Path: C60-A82C:/service0012/char0013
---START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service0012/char0013][0m# read
-Attempting to read /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0012/char0013
-[0;94m[C60-A82C:/service0012/char0013][0m# [[0;93mCHG[0m] Attribute /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0012/char0013 Value:
-[0;94m[C60-A82C:/service0012/char0013][0m#   00                                               .               
-[0;94m[C60-A82C:/service0012/char0013][0m#   00                                               .               
-[0;94m[C60-A82C:/service0012/char0013][0m# --END--
-
---END--
-
-UUID: 00002902-0000-1000-8000-00805f9b34fb
-Path: C60-A82C:/service0012/char0013/desc0015
---START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service0012/char0013/desc0015][0m# read
-Attempting to read /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0012/char0013/desc0015
-[0;94m[C60-A82C:/service0012/char0013/desc0015][0m# [[0;93mCHG[0m] Attribute /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0012/char0013/desc0015 Value:
-[0;94m[C60-A82C:/service0012/char0013/desc0015][0m#   00 00                                            ..              
-[0;94m[C60-A82C:/service0012/char0013/desc0015][0m#   00 00                                            ..              
-[0;94m[C60-A82C:/service0012/char0013/desc0015][0m# --END--
-
---END--
-
-UUID: 0000ff00-0000-1000-8000-00805f9b34fb
-Path: C60-A82C:/service000c
---START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service000c][0m# read
-Unable to read attribute /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service000c
-[0;94m[C60-A82C:/service000c][0m# --END--
-
---END--
-
-UUID: 0000ff02-0000-1000-8000-00805f9b34fb
-Path: C60-A82C:/service000c/char0010
---START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service000c/char0010][0m# read
-Attempting to read /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service000c/char0010
-[0;94m[C60-A82C:/service000c/char0010][0m# [[0;93mCHG[0m] Attribute /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service000c/char0010 Value:
-[0;94m[C60-A82C:/service000c/char0010][0m#   00                                               .               
-[0;94m[C60-A82C:/service000c/char0010][0m#   00                                               .               
-[0;94m[C60-A82C:/service000c/char0010][0m# --END--
-
---END--
-
-UUID: 0000ff01-0000-1000-8000-00805f9b34fb
-Path: C60-A82C:/service000c/char000d
---START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service000c/char000d][0m# read
-Attempting to read /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service000c/char000d
-[0;94m[C60-A82C:/service000c/char000d][0m# [[0;93mCHG[0m] Attribute /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service000c/char000d Value:
-[0;94m[C60-A82C:/service000c/char000d][0m#   00                                               .               
-[0;94m[C60-A82C:/service000c/char000d][0m#   00                                               .               
-[0;94m[C60-A82C:/service000c/char000d][0m# --END--
-
---END--
-
-UUID: 00002902-0000-1000-8000-00805f9b34fb
-Path: C60-A82C:/service000c/char000d/desc000f
---START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service000c/char000d/desc000f][0m# read
-Attempting to read /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service000c/char000d/desc000f
-[0;94m[C60-A82C:/service000c/char000d/desc000f][0m# --END--
-
---END--
-
-UUID: 00001801-0000-1000-8000-00805f9b34fb
-Path: C60-A82C:/service0008
---START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service0008][0m# read
-Unable to read attribute /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0008
-[0;94m[C60-A82C:/service0008][0m#   00 00                                            ..              
-[0;94m[C60-A82C:/service0008][0m# --END--
+[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> char-read-uuid 00002a04-0000-1000-8000-00805f9b34fb
+[?2004l[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> [Khandle: 0x0007 	 value: 1e 00 32 00 14 00 58 02 
 
 --END--
 
 UUID: 00002a05-0000-1000-8000-00805f9b34fb
-Path: C60-A82C:/service0008/char0009
 --START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service0008/char0009][0m# read
-Attempting to read /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0008/char0009
-[0;94m[C60-A82C:/service0008/char0009][0m# [[0;93mCHG[0m] Attribute /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0008/char0009 Value:
-[0;94m[C60-A82C:/service0008/char0009][0m#   00 00 00 00                                      ....            
-[0;94m[C60-A82C:/service0008/char0009][0m#   00 00 00 00                                      ....            
-[0;94m[C60-A82C:/service0008/char0009][0m# --END--
+[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> char-read-uuid 00002a05-0000-1000-8000-00805f9b34fb
 
 --END--
 
-UUID: 00002902-0000-1000-8000-00805f9b34fb
-Path: C60-A82C:/service0008/char0009/desc000b
+UUID: 0000ff01-0000-1000-8000-00805f9b34fb
 --START--
-[1;39m
-Use "help" for a list of available commands in a menu.
-Use "menu <submenu>" if you want to enter any submenu.
-Use "back" if you want to return to menu main.[0m
-[0;94m[C60-A82C:/service0008/char0009/desc000b][0m# read
-Attempting to read /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0008/char0009/desc000b
-[0;94m[C60-A82C:/service0008/char0009/desc000b][0m# [[0;93mCHG[0m] Attribute /org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service0008/char0009/desc000b Value:
-[0;94m[C60-A82C:/service0008/char0009/desc000b][0m#   00 00                                            ..              
-[0;94m[C60-A82C:/service0008/char0009/desc000b][0m#   00 00                                            ..              
-[0;94m[C60-A82C:/service0008/char0009/desc000b][0m# --END--
+[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> char-read-uuid 0000ff01-0000-1000-8000-00805f9b34fb
+[?2004l[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> [Khandle: 0x000a 	 value: 00 00 00 00 
+[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> [Khandle: 0x000e 	 value: 00 
+
+--END--
+
+UUID: 0000ff02-0000-1000-8000-00805f9b34fb
+--START--
+[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> char-read-uuid 0000ff02-0000-1000-8000-00805f9b34fb
+[?2004l[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> [Khandle: 0x0011 	 value: 00 
+
+--END--
+
+UUID: 00002a37-0000-1000-8000-00805f9b34fb
+--START--
+[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> char-read-uuid 00002a37-0000-1000-8000-00805f9b34fb
+
+--END--
+
+UUID: 00010203-0405-0607-0809-0a0b0c0d2b12
+--START--
+[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> char-read-uuid 00010203-0405-0607-0809-0a0b0c0d2b12
+[?2004l[?2004h[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> [Khandle: 0x0014 	 value: 00 
+[0;94m[A4:C1:38:9A:A8:2C][0m[LE]> [Khandle: 0x0018 	 value: 00 
 
 --END--

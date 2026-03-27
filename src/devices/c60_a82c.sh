@@ -121,12 +121,7 @@ wrish_c60a82c_info() {
     fi
 
     local name
-    name=$(printf '%s\n' "$hex_bytes" \
-        | tr ' ' '\n' \
-        | while IFS= read -r h; do
-            [ -n "$h" ] && printf "\\x${h}"
-          done \
-        | tr -cd '[:print:]')
+    name=$(wrish_hex_to_ascii "$hex_bytes")
 
     echo "Device Name (0x2A00): ${name}"
     echo "MAC:                  ${mac}"

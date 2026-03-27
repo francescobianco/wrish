@@ -4,9 +4,7 @@ module gatttool
 # Restart Bluetooth adapter to clear stale connections.
 wrish_gatttool_restart() {
     bluetoothctl power off > /dev/null 2>&1
-    sleep 2
     bluetoothctl power on  > /dev/null 2>&1
-    sleep 2
 }
 
 # Read a single GATT characteristic by UUID. Args: <mac> <uuid>
@@ -43,11 +41,20 @@ wrish_gatttool_characteristics() {
 #   --END--
 # Args: <mac> [--raw]
 wrish_gatttool_deep_read() {
+    echo "[deep-read] restarting bluetooth" >&2
+
+    wrish_gatttool_restart
+
     local mac="$1"
     local raw_mode=0
+    local decode_mode="raw"
     shift
     while [ $# -gt 0 ]; do
-        case "$1" in --raw) raw_mode=1 ;; esac
+        case "$1" in
+            --raw)           raw_mode=1 ;;
+            --ascii)         decode_mode="ascii" ;;
+            --little-endian) decode_mode="little-endian" ;;
+        esac
         shift
     done
 
@@ -94,6 +101,7 @@ wrish_gatttool_deep_read() {
 
     # Phase 3: state-machine parser
     # idle → (line contains --HEAD--) → reading → (line contains --END--) → idle
+    # On --END--: extract clean hex pairs from gatttool "handle: 0xXX   value: XX XX ..."
     local state="idle"
     local buf=""
     local uuid_idx=0
@@ -107,12 +115,36 @@ wrish_gatttool_deep_read() {
             buf=""
         elif echo "$clean" | grep -qF -- "--END--"; then
             if [ "$state" = "reading" ]; then
-                echo ""
-                echo "UUID: ${uuids[$uuid_idx]:-?}"
-                echo "--START--"
-                printf '%s\n' "$buf"
-                echo "--END--"
+                local current_uuid="${uuids[$uuid_idx]:-?}"
                 uuid_idx=$(( uuid_idx + 1 ))
+
+                # Extract hex pairs from: handle: 0xXXXX   value: XX XX XX ...
+                local hex_val
+                hex_val=$(printf '%s\n' "$buf" \
+                    | sed 's/\x1b\[[0-9;]*m//g' \
+                    | grep -oP 'value: \K[0-9a-f ]+' \
+                    | head -1 \
+                    | sed 's/[[:space:]]*$//')
+
+                echo ""
+                echo "UUID:  ${current_uuid}"
+                if [ -n "$hex_val" ]; then
+                    echo "hex:   ${hex_val}"
+                    if [ "$decode_mode" != "raw" ]; then
+                        local decoded
+                        decoded=$(wrish_hex_decode "$hex_val" "$decode_mode")
+                        [ -n "$decoded" ] && echo "${decode_mode}: ${decoded}"
+                    fi
+                else
+                    # Show first meaningful non-empty, non-prompt error line
+                    local err
+                    err=$(printf '%s\n' "$buf" \
+                        | sed 's/\x1b\[[0-9;]*m//g' \
+                        | grep -ivE '^\s*$|^char-read-uuid|\[.*\]>' \
+                        | head -1 \
+                        | sed 's/^[[:space:]]*//')
+                    echo "error: ${err:-(no response)}"
+                fi
             fi
             state="idle"
         elif [ "$state" = "reading" ]; then
