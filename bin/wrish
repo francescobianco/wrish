@@ -13,7 +13,7 @@ set -e
 # @file_type: build-entrypoint
 # @build_type: bin
 # @build_with: Mush v0.2.0 (2026-03-21 develop)
-# @build_date: 2026-03-27T21:26:26Z
+# @build_date: 2026-03-27T22:18:20Z
 
 # @section_code: SC005
 # @section_name: functions
@@ -33,6 +33,7 @@ inject() { return 0; }
 
 module bluetooth
 module gatt
+module gatttool
 module devices
 module router
 
@@ -149,7 +150,7 @@ main() {
         ;;
       deep-read)
         shift
-        wrish_bluetooth_deep_read "${WRISH_MAC}" "$@"
+        wrish_router_deep_read "$@"
         ;;
       *)
         echo "Unknown command: $1. Run 'wrish --help' for usage." >&2
@@ -577,6 +578,134 @@ wrish_gatt_close() {
 # @section_code: SC007
 # @section_name: source
 # @source_index: 4
+# @source_file: src/gatttool.sh
+# @portion_type: module
+
+module gatttool
+
+# Restart Bluetooth adapter to clear stale connections.
+wrish_gatttool_restart() {
+    bluetoothctl power off > /dev/null 2>&1
+    sleep 2
+    bluetoothctl power on  > /dev/null 2>&1
+    sleep 2
+}
+
+# Read a single GATT characteristic by UUID. Args: <mac> <uuid>
+# Returns raw gatttool output (includes echoed commands from PTY).
+wrish_gatttool_read_uuid() {
+    local mac="$1"
+    local uuid="$2"
+    (
+        echo "connect ${mac}"
+        sleep 10
+        echo "char-read-uuid ${uuid}"
+        sleep 3
+    ) | script -q -c "gatttool -I" /dev/null 2>&1
+}
+
+# List all GATT characteristics. Args: <mac>
+# Returns raw gatttool output.
+wrish_gatttool_characteristics() {
+    local mac="$1"
+    (
+        echo "connect ${mac}"
+        sleep 10
+        echo "characteristics"
+        sleep 3
+    ) | script -q -c "gatttool -I" /dev/null 2>&1
+}
+
+# Deep read: list all characteristics then read each UUID in one session.
+# Uses --HEAD-- / --END-- echo-sentinels to delimit per-attribute blocks.
+# Output per attribute:
+#   UUID: <uuid>
+#   --START--
+#   <raw payload lines>
+#   --END--
+# Args: <mac> [--raw]
+wrish_gatttool_deep_read() {
+    local mac="$1"
+    local raw_mode=0
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in --raw) raw_mode=1 ;; esac
+        shift
+    done
+
+    echo "[deep-read] listing characteristics on ${mac}..." >&2
+
+    # Phase 1: collect UUIDs
+    local raw_chars
+    raw_chars=$(wrish_gatttool_characteristics "$mac")
+
+    local uuids=()
+    mapfile -t uuids < <(
+        printf '%s\n' "$raw_chars" \
+          | sed 's/\x1b\[[0-9;]*m//g' \
+          | grep -oP 'uuid: \K[0-9a-f-]+'
+    )
+
+    if [ ${#uuids[@]} -eq 0 ]; then
+        echo "[deep-read] no characteristics found" >&2
+        return 1
+    fi
+    echo "[deep-read] found ${#uuids[@]} characteristics" >&2
+
+    # Phase 2: one session — each UUID wrapped by --HEAD-- / --END-- markers.
+    # script provides a PTY so typed commands are echoed to output;
+    # the echoed --HEAD-- / --END-- strings act as reliable delimiters.
+    local output
+    output=$(
+        (
+            echo "connect ${mac}"
+            sleep 10
+            for uuid in "${uuids[@]}"; do
+                echo "--HEAD--"
+                echo "char-read-uuid ${uuid}"
+                sleep 1
+                echo "--END--"
+            done
+        ) | script -q -c "gatttool -I" /dev/null 2>&1
+    )
+
+    if [ "$raw_mode" -eq 1 ]; then
+        echo "$output"
+        return 0
+    fi
+
+    # Phase 3: state-machine parser
+    # idle → (line contains --HEAD--) → reading → (line contains --END--) → idle
+    local state="idle"
+    local buf=""
+    local uuid_idx=0
+
+    while IFS= read -r line; do
+        local clean
+        clean=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g')
+
+        if echo "$clean" | grep -qF -- "--HEAD--"; then
+            state="reading"
+            buf=""
+        elif echo "$clean" | grep -qF -- "--END--"; then
+            if [ "$state" = "reading" ]; then
+                echo ""
+                echo "UUID: ${uuids[$uuid_idx]:-?}"
+                echo "--START--"
+                printf '%s\n' "$buf"
+                echo "--END--"
+                uuid_idx=$(( uuid_idx + 1 ))
+            fi
+            state="idle"
+        elif [ "$state" = "reading" ]; then
+            buf+="${line}"$'\n'
+        fi
+    done <<< "$output"
+}
+
+# @section_code: SC007
+# @section_name: source
+# @source_index: 5
 # @source_file: src/devices/module.sh
 # @portion_type: module
 
@@ -584,7 +713,7 @@ module c60_a82c
 
 # @section_code: SC007
 # @section_name: source
-# @source_index: 5
+# @source_index: 6
 # @source_file: src/devices/c60_a82c.sh
 # @portion_type: module
 
@@ -686,24 +815,44 @@ wrish_c60a82c_app_type() {
     esac
 }
 
-# Read device info (requires connection). Args: <mac>
+# Read device info — real GATT read of 0x2A00 via gatttool. Args: <mac>
 wrish_c60a82c_info() {
     local mac
     mac="${1:-${WRISH_MAC}}"
 
-    wrish_gatt_ensure_connected "$mac" || return 1
+    echo "[info] reading device name from GATT 0x2A00 on ${mac}..." >&2
 
-    echo -e "info ${mac}\nexit" | bluetoothctl 2>/dev/null \
-        | grep -E '^\s+(Name|Alias|Connected|Paired|Trusted|RSSI)' \
-        | sed 's/^\s*//' \
-        | awk -F': ' '
-            /^Name/      { printf "Device Name (0x2A00): %s\n", $2 }
-            /^Alias/     { next }
-            /^Connected/ { printf "Connected:            %s\n", $2 }
-            /^Paired/    { printf "Paired:               %s\n", $2 }
-            /^Trusted/   { printf "Trusted:              %s\n", $2 }
-            /^RSSI/      { printf "RSSI:                 %s\n", $2 }
-        '
+    local raw
+    raw=$(wrish_gatttool_read_uuid "$mac" "00002a00-0000-1000-8000-00805f9b34fb")
+
+    # Extract hex bytes from: handle: 0x00XX   value: XX XX XX ...
+    local hex_bytes
+    hex_bytes=$(printf '%s\n' "$raw" \
+        | sed 's/\x1b\[[0-9;]*m//g' \
+        | grep -oP 'value: \K[0-9a-f ]+' \
+        | head -1 \
+        | sed 's/[[:space:]]*$//')
+
+    if [ -z "$hex_bytes" ]; then
+        echo "Error: could not read device name (not connected or no response)" >&2
+        return 1
+    fi
+
+    local name
+    name=$(printf '%s\n' "$hex_bytes" \
+        | tr ' ' '\n' \
+        | while IFS= read -r h; do
+            [ -n "$h" ] && printf "\\x${h}"
+          done \
+        | tr -cd '[:print:]')
+
+    echo "Device Name (0x2A00): ${name}"
+    echo "MAC:                  ${mac}"
+}
+
+# Deep read all GATT characteristics via gatttool. Args: [--raw]
+wrish_c60a82c_deep_read() {
+    wrish_gatttool_deep_read "${WRISH_MAC}" "$@"
 }
 
 # Read battery level via vendor command on FF02, response on FF01.
@@ -855,7 +1004,7 @@ wrish_c60a82c_heart_rate_monitor() {
 
 # @section_code: SC007
 # @section_name: source
-# @source_index: 6
+# @source_index: 7
 # @source_file: src/router.sh
 # @portion_type: module
 
@@ -889,6 +1038,14 @@ wrish_router_heart_rate() {
 wrish_router_battery() {
     case "${WRISH_DEVICE}" in
         C60-A82C) wrish_c60a82c_battery "$@" ;;
+        *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
+    esac
+}
+
+# Route 'deep-read' to the correct device handler
+wrish_router_deep_read() {
+    case "${WRISH_DEVICE}" in
+        C60-A82C) wrish_c60a82c_deep_read "$@" ;;
         *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
     esac
 }
