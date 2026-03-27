@@ -124,12 +124,13 @@ wrish_bluetooth_deep_read() {
                 sleep 1
             done
             echo "exit"
-        } | bluetoothctl 2>/dev/null
+        } | bluetoothctl 2>&1
     )
 
-    # Step 3: strip ANSI codes, then split on "Unknown command" sentinel lines.
-    # The output between pairs of sentinels is the read result for each UUID.
-    # Pattern: ... sentinel ... [read output] ... sentinel ... (repeat)
+    # Step 3: strip ANSI codes, then split on sentinel lines.
+    # In the GATT submenu, an unknown command like "--" produces:
+    #   "Invalid command in menu gatt: --"  (or "Unknown command: --" at top level)
+    # We match both forms as sentinels around each read's output.
     stripped=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g')
 
     idx=0
@@ -140,7 +141,7 @@ wrish_bluetooth_deep_read() {
     local uuid_idx=0
 
     while IFS= read -r line; do
-        if echo "$line" | grep -q "Unknown command"; then
+        if echo "$line" | grep -qE "(Unknown|Invalid) command"; then
             sentinel_count=$(( sentinel_count + 1 ))
             if (( sentinel_count % 2 == 1 )); then
                 # odd sentinel = start of read block
