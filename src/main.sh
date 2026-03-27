@@ -1,5 +1,6 @@
 
 module bluetooth
+module gatt
 module devices
 
 main() {
