@@ -6,9 +6,9 @@ wrish_bluetooth_scan() {
         echo "scan on"
         sleep "${1:-10}"
         echo "scan off"
-        echo "devices"
         echo "exit"
-    } | bluetoothctl | grep -E 'Device ([0-9A-F]{2}:){5}[0-9A-F]{2}' | awk '{print "[" $2 "] " $3}'
+    } | bluetoothctl > /dev/null 2>&1
+    wrish_bluetooth_list
 }
 
 wrish_bluetooth_list() {
