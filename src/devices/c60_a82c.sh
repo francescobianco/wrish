@@ -314,6 +314,19 @@ wrish_c60a82c_battery() {
         esac
     done
 
+    echo "[battery] checking connection to ${mac}..." >&2
+    local attempt=1
+    while ! wrish_gatttool_check_connected "$mac"; do
+        if [ "$attempt" -ge 3 ]; then
+            echo "[battery] ERROR: device ${mac} not connected after ${attempt} attempts" >&2
+            return 1
+        fi
+        echo "[battery] not connected — power cycle attempt ${attempt}/3..." >&2
+        wrish_gatttool_restart
+        attempt=$(( attempt + 1 ))
+    done
+    echo "[battery] connected (attempt ${attempt})" >&2
+
     echo "[battery] resolving handles..." >&2
     local char_desc
     char_desc=$(wrish_gatttool_char_desc "$mac")
