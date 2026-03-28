@@ -302,7 +302,8 @@ wrish_c60a82c_scan_cmds() {
 }
 
 # Read battery level via vendor command on FF02, response on FF01 notification.
-# Query: 03 01 00 00 b2  — battery % in byte[3] of the notification payload.
+# Query: CMD_GET_CURRENT_POWER = 27 00 00 74
+# Response: 27 01 00 [percent%] [chk] — battery % is byte[3].
 # Args: [--mac <mac>]
 wrish_c60a82c_battery() {
     local mac="${WRISH_MAC}"
@@ -335,7 +336,7 @@ wrish_c60a82c_battery() {
             sleep 10
             echo "char-write-req ${ff01_cccd} 01 00"
             sleep 1
-            echo "char-write-cmd ${ff02_handle} 03 01 00 00 b2"
+            echo "char-write-cmd ${ff02_handle} 27 00 00 74"
             sleep 5
         ) | script -q -c "gatttool -I" /dev/null 2>&1
     )
