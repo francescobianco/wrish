@@ -164,9 +164,11 @@ def send_notification(mac, app_name, title, body, hci="hci0"):
         state["stage"] += 1
 
         if state["stage"] < len(frames):
-            write_frame(state["stage"])
+            # Schedule outside the signal handler to avoid D-Bus re-entrancy issues
+            next_stage = state["stage"]
+            GLib.timeout_add(200, lambda: write_frame(next_stage) or False)
         else:
-            loop.quit()
+            GLib.timeout_add(200, loop.quit)
 
     bus.add_signal_receiver(
         on_ff01_changed,
