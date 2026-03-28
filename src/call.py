@@ -43,7 +43,6 @@ APP_TYPE_CALL = 0x00
 
 CMD_GET_DEVICE_STATE = [0x02, 0x00, 0x00, 0x06]
 CMD_SET_NOTICE_ALL   = [0x09, 0x04, 0x00, 0xff, 0xff, 0xff, 0xff, 0x60]
-CMD_SET_PHONE_TYPE   = [0x47, 0x01, 0x00, 0x01, 0xe0]
 
 END_MESSAGE = [0x0A, 0x01, 0x00, 0x03, 0x0E]
 
@@ -178,10 +177,11 @@ def simulate_call(mac, caller, number, hci="hci0", do_init=True):
     #   "set_state"    → waiting for CMD_SET_DEVICE_STATE ACK
     #   "set_time"     → waiting for CMD_SET_TIME ACK
     #   "set_notice"   → waiting for CMD_SET_NOTICE ACK
-    #   "set_phone"    → waiting for CMD_SET_PHONE_TYPE ACK (0xC7)
     #   "notify"       → notification stages 0..3
+    #
+    # Note: CMD_SET_PHONE_TYPE (0x47) was skipped — the bracelet does not ACK it.
     state = {
-        "phase": "get_state" if do_init else "set_phone",
+        "phase": "get_state" if do_init else "notify",
         "notify_stage": 0,
         "acks": 0,
         "device_state_payload": None,
@@ -239,14 +239,6 @@ def simulate_call(mac, caller, number, hci="hci0", do_init=True):
         # ── Init: CMD_SET_NOTICE ACK ─────────────────────────────────────────
         if phase == "set_notice" and first == 0x89 and length == 1:
             print("[call] CMD_SET_NOTICE ACK — init complete", file=sys.stderr)
-            state["phase"] = "set_phone"
-            print(f"[call] sending CMD_SET_PHONE_TYPE: {' '.join(f'{b:02x}' for b in CMD_SET_PHONE_TYPE)}", file=sys.stderr)
-            GLib.timeout_add(300, lambda: write_value(ff02, CMD_SET_PHONE_TYPE) or False)
-            return
-
-        # ── CMD_SET_PHONE_TYPE ACK (0x80|0x47 = 0xC7) ───────────────────────
-        if phase == "set_phone" and first == 0xC7:
-            print("[call] CMD_SET_PHONE_TYPE ACK — sending call notification", file=sys.stderr)
             state["phase"] = "notify"
             GLib.timeout_add(300, lambda: send_notify_stage(0) or False)
             return
@@ -280,8 +272,7 @@ def simulate_call(mac, caller, number, hci="hci0", do_init=True):
             print(f"[call] sending CMD_GET_DEVICE_STATE: {' '.join(f'{b:02x}' for b in CMD_GET_DEVICE_STATE)}", file=sys.stderr)
             write_value(ff02, CMD_GET_DEVICE_STATE)
         else:
-            print(f"[call] sending CMD_SET_PHONE_TYPE: {' '.join(f'{b:02x}' for b in CMD_SET_PHONE_TYPE)}", file=sys.stderr)
-            write_value(ff02, CMD_SET_PHONE_TYPE)
+            send_notify_stage(0)
         GLib.timeout_add(30000, loop.quit)
 
     GLib.timeout_add(200, run)
