@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Send a notification to a C60-A82C bracelet via BlueZ D-Bus."""
+"""Send a notification to a C60-A82C bracelet via BlueZ D-Bus.
+
+Protocol (4 stages, each waits for ACK on FF01 before proceeding):
+  stage 0  setMessageType   FF02 ← 0a 02 00 00 [appType] [chk]   ACK: 8a ... 00 ...
+  stage 1  title            FF02 ← 0a [len] 00 01 [utf8...]  [chk]   ACK: 8a ... 01 ...
+  stage 2  body             FF02 ← 0a [len] 00 02 [utf8...]  [chk]   ACK: 8a ... 02 ...
+  stage 3  END_MESSAGE      FF02 ← 0a 01 00 03 0e                    ACK: 8a ... 03 ...
+
+Usage:
+  python3 notify.py --title "Hello" --body "World" [--app whatsapp] [--mac ...] [--hci hci0]
+"""
 
 import argparse
 import sys
@@ -17,9 +27,22 @@ APP_TYPES = {
     "work_wechat": 54, "tantan": 56, "taobao": 57,
 }
 
+STAGE_NAMES = ["setMessageType", "title", "body", "END_MESSAGE"]
+
+BLUEZ_SVC    = "org.bluez"
+PROPS_IFACE  = "org.freedesktop.DBus.Properties"
+DEVICE_IFACE = "org.bluez.Device1"
+GATT_IFACE   = "org.bluez.GattCharacteristic1"
+OM_IFACE     = "org.freedesktop.DBus.ObjectManager"
+
+FF01_UUID_PREFIX = "0000ff01"
+FF02_UUID_PREFIX = "0000ff02"
+
 
 def checksum(bs):
-    s = sum(bs) & 0xFF
+    s = 0
+    for b in bs:
+        s = (s + b) & 0xFF
     return ((s * 0x56) + 0x5A) & 0xFF
 
 
@@ -29,7 +52,7 @@ def frame_msg_type(app_type):
 
 
 def frame_msg2(kind, text, max_len):
-    tb = list(text[:max_len].encode("utf-8"))
+    tb = list(text.encode("utf-8")[:max_len])
     plen = 1 + len(tb)
     bs = [0x0A, plen & 0xFF, (plen >> 8) & 0xFF, kind] + tb
     return bs + [checksum(bs)]
@@ -38,53 +61,61 @@ def frame_msg2(kind, text, max_len):
 END_MESSAGE = [0x0A, 0x01, 0x00, 0x03, 0x0E]
 
 
-def find_char_path(bus, dev_path, uuid_prefix):
-    """Find GATT characteristic path by UUID prefix using ObjectManager."""
-    mgr = dbus.Interface(
-        bus.get_object("org.bluez", "/"),
-        "org.freedesktop.DBus.ObjectManager"
-    )
+def find_char(bus, dev_path, uuid_prefix):
+    mgr = dbus.Interface(bus.get_object(BLUEZ_SVC, "/"), OM_IFACE)
     for path, ifaces in mgr.GetManagedObjects().items():
-        if "org.bluez.GattCharacteristic1" not in ifaces:
+        if GATT_IFACE not in ifaces:
             continue
         if dev_path not in str(path):
             continue
-        uuid = str(ifaces["org.bluez.GattCharacteristic1"].get("UUID", ""))
+        uuid = str(ifaces[GATT_IFACE].get("UUID", ""))
         if uuid_prefix in uuid:
             return str(path)
     return None
 
 
-def send_notification(mac, app_name, title, body):
+def ensure_connected(bus, dev_path, mac):
+    dev = bus.get_object(BLUEZ_SVC, dev_path)
+    props = dbus.Interface(dev, PROPS_IFACE)
+    if props.Get(DEVICE_IFACE, "Connected"):
+        print("[notify] already connected", file=sys.stderr)
+        return
+    print(f"[notify] connecting to {mac}...", file=sys.stderr)
+    dbus.Interface(dev, DEVICE_IFACE).Connect()
+    for _ in range(30):
+        time.sleep(0.5)
+        if props.Get(DEVICE_IFACE, "Connected"):
+            print("[notify] connected", file=sys.stderr)
+            return
+    raise RuntimeError("Could not connect to device")
+
+
+def send_notification(mac, app_name, title, body, hci="hci0"):
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
 
-    mac_path = mac.replace(":", "_")
-    dev_path = f"/org/bluez/hci0/dev_{mac_path}"
+    mac_path = mac.upper().replace(":", "_")
+    dev_path = f"/org/bluez/{hci}/dev_{mac_path}"
 
-    dev = bus.get_object("org.bluez", dev_path)
-    dev_props = dbus.Interface(dev, "org.freedesktop.DBus.Properties")
+    ensure_connected(bus, dev_path, mac)
 
-    if not dev_props.Get("org.bluez.Device1", "Connected"):
-        print(f"[notify] connecting to {mac}...", file=sys.stderr)
-        dbus.Interface(dev, "org.bluez.Device1").Connect()
-        for _ in range(20):
-            time.sleep(0.5)
-            if dev_props.Get("org.bluez.Device1", "Connected"):
-                break
-        else:
-            print(f"[notify] ERROR: could not connect to {mac}", file=sys.stderr)
-            return False
-
-    ff01_path = find_char_path(bus, dev_path, "0000ff01")
-    ff02_path = find_char_path(bus, dev_path, "0000ff02")
+    print("[notify] waiting for GATT services...", file=sys.stderr)
+    ff01_path = ff02_path = None
+    for _ in range(20):
+        ff01_path = find_char(bus, dev_path, FF01_UUID_PREFIX)
+        ff02_path = find_char(bus, dev_path, FF02_UUID_PREFIX)
+        if ff01_path and ff02_path:
+            break
+        time.sleep(0.5)
 
     if not ff01_path or not ff02_path:
-        print("[notify] ERROR: FF01/FF02 characteristics not found", file=sys.stderr)
-        return False
+        raise RuntimeError("FF01/FF02 characteristics not found")
 
-    ff01_iface = dbus.Interface(bus.get_object("org.bluez", ff01_path), "org.bluez.GattCharacteristic1")
-    ff02_iface = dbus.Interface(bus.get_object("org.bluez", ff02_path), "org.bluez.GattCharacteristic1")
+    print(f"[notify] FF01={ff01_path}", file=sys.stderr)
+    print(f"[notify] FF02={ff02_path}", file=sys.stderr)
+
+    ff01 = dbus.Interface(bus.get_object(BLUEZ_SVC, ff01_path), GATT_IFACE)
+    ff02 = dbus.Interface(bus.get_object(BLUEZ_SVC, ff02_path), GATT_IFACE)
 
     app_type = APP_TYPES.get(app_name.lower(), 7)
     frames = [
@@ -94,62 +125,94 @@ def send_notification(mac, app_name, title, body):
         END_MESSAGE,
     ]
 
-    acks = {}
-    loop = GLib.MainLoop()
-    ff01_key = ff01_path.split("/")[-1]
+    for i, (name, frame) in enumerate(zip(STAGE_NAMES, frames)):
+        preview = " ".join(f"{b:02x}" for b in frame[:12])
+        suffix = "..." if len(frame) > 12 else ""
+        print(f"[notify] frame {i} ({name}): {preview}{suffix}", file=sys.stderr)
 
-    def on_props_changed(iface, changed, invalidated, path=None):
-        if "Value" not in changed or ff01_key not in str(path or ""):
+    state = {"stage": 0, "acks": 0}
+    loop = GLib.MainLoop()
+
+    def write_frame(stage):
+        frame = frames[stage]
+        name = STAGE_NAMES[stage]
+        print(f"[notify] sending stage {stage} ({name})", file=sys.stderr)
+        for i in range(0, len(frame), 20):
+            chunk = frame[i:i + 20]
+            ff02.WriteValue(
+                dbus.Array([dbus.Byte(b) for b in chunk], signature="y"), {}
+            )
+            if i + 20 < len(frame):
+                time.sleep(0.1)
+
+    def on_ff01_changed(iface, changed, _invalidated, path=None):
+        if "Value" not in changed:
             return
-        val = list(changed["Value"])
-        if len(val) >= 4 and val[0] == 0x8A:
-            acks[val[3]] = val
+        data = list(changed["Value"])
+        hex_str = " ".join(f"{b:02x}" for b in data)
+        print(f"[notify] FF01: {hex_str}", file=sys.stderr)
+
+        # ACK frame: starts with 0x8a, byte[3] = stage index
+        if len(data) < 4 or data[0] != 0x8A:
+            return
+        ack_stage = int(data[3])
+        if ack_stage != state["stage"]:
+            return
+
+        print(f"[notify] ACK stage {ack_stage} ({STAGE_NAMES[ack_stage]})", file=sys.stderr)
+        state["acks"] += 1
+        state["stage"] += 1
+
+        if state["stage"] < len(frames):
+            write_frame(state["stage"])
+        else:
+            loop.quit()
 
     bus.add_signal_receiver(
-        on_props_changed,
+        on_ff01_changed,
         signal_name="PropertiesChanged",
-        dbus_interface="org.freedesktop.DBus.Properties",
+        dbus_interface=PROPS_IFACE,
+        path=ff01_path,
         path_keyword="path",
     )
 
     def run():
-        ff01_iface.StartNotify()
+        ff01.StartNotify()
         time.sleep(0.3)
-
-        for stage, frame in enumerate(frames):
-            for i in range(0, len(frame), 20):
-                chunk = frame[i:i + 20]
-                ff02_iface.WriteValue(
-                    dbus.Array([dbus.Byte(b) for b in chunk], signature="y"), {}
-                )
-                time.sleep(0.2)
-
-            deadline = time.time() + 8
-            while stage not in acks and time.time() < deadline:
-                GLib.MainContext.default().iteration(False)
-                time.sleep(0.05)
-
-            status = "OK" if stage in acks else "no ACK"
-            print(f"[notify] stage {stage} {status}", file=sys.stderr)
-
-        ff01_iface.StopNotify()
-        loop.quit()
+        write_frame(0)
+        GLib.timeout_add(30000, loop.quit)  # 30s global timeout
 
     GLib.timeout_add(200, run)
     loop.run()
-    return len(acks) == 4
+
+    try:
+        ff01.StopNotify()
+    except Exception:
+        pass
+
+    acks = state["acks"]
+    print(f"[notify] done ({acks}/4 ACKs)", file=sys.stderr)
+    if acks < 4:
+        raise RuntimeError(f"Incomplete delivery: only {acks}/4 ACKs received")
+
+    return True
 
 
 def main():
     parser = argparse.ArgumentParser(description="Send notification to C60-A82C bracelet")
-    parser.add_argument("--mac", required=True, help="Device MAC address")
-    parser.add_argument("--app", default="whatsapp", help="App name")
-    parser.add_argument("--title", default="", help="Notification title")
-    parser.add_argument("--body", default="", help="Notification body")
+    parser.add_argument("--mac", default="A4:C1:38:9A:A8:2C", help="Device MAC address")
+    parser.add_argument("--hci", default="hci0", help="HCI adapter (default: hci0)")
+    parser.add_argument("--app", default="whatsapp", help="App name (default: whatsapp)")
+    parser.add_argument("--title", default="", help="Notification title (max 32 chars)")
+    parser.add_argument("--body", default="", help="Notification body (max 128 chars)")
     args = parser.parse_args()
 
-    ok = send_notification(args.mac, args.app, args.title, args.body)
-    sys.exit(0 if ok else 1)
+    try:
+        send_notification(args.mac, args.app, args.title, args.body, args.hci)
+        print("Notification sent")
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
