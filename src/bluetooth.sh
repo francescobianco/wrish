@@ -52,7 +52,7 @@ wrish_bluetooth_list_attributes() {
   wrish_mac="$1"
 
 
-  echo -e "connect ${wrish_mac}\nmenu gatt\nlist-attributes ${wrish_mac}\nexit" | bluetoothctl | grep -P '^\t0000' | awk '{$1=$1; print}'
+  echo -e "connect ${wrish_mac}\nmenu gatt\nlist-attributes ${wrish_mac}\nexit" | bluetoothctl | grep $'^\t0000' | awk '{$1=$1; print}'
 }
 
 wrish_bluetooth_read_attribute() {

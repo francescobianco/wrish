@@ -64,3 +64,11 @@ wrish_router_raw() {
         *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
     esac
 }
+
+# Route 'scan-cmds' to the correct device handler
+wrish_router_scan_cmds() {
+    case "${WRISH_DEVICE}" in
+        C60-A82C) wrish_c60a82c_scan_cmds "$@" ;;
+        *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
+    esac
+}

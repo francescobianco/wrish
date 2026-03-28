@@ -96,7 +96,7 @@ wrish_gatt_wait_log() {
         if [ -n "$new_content" ]; then
             WRISH_GATT_LOG_POS=$(wc -c < "$WRISH_GATT_LOG")
             echo "$new_content"
-            if echo "$new_content" | grep -qP "$pattern"; then
+            if echo "$new_content" | grep -qE "$pattern"; then
                 return 0
             fi
         fi

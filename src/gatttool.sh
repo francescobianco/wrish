@@ -71,7 +71,8 @@ wrish_gatttool_find_handle() {
     printf '%s\n' "$output" \
         | sed 's/\x1b\[[0-9;]*m//g' \
         | grep -i "uuid: ${uuid}" \
-        | grep -oP 'handle: \K0x[0-9a-f]+' \
+        | grep -oE 'handle: 0x[0-9a-f]+' \
+        | sed 's/handle: //' \
         | head -1
 }
 
@@ -84,12 +85,12 @@ wrish_gatttool_find_cccd() {
 
     stripped=$(printf '%s\n' "$output" \
         | sed 's/\x1b\[[0-9;]*m//g' \
-        | grep -oP 'handle: 0x[0-9a-f]+, uuid: [0-9a-f-]+')
+        | grep -oE 'handle: 0x[0-9a-f]+, uuid: [0-9a-f-]+')
 
     while IFS= read -r line; do
         local h u
-        h=$(printf '%s' "$line" | grep -oP 'handle: \K0x[0-9a-f]+')
-        u=$(printf '%s' "$line" | grep -oP 'uuid: \K[0-9a-f-]+')
+        h=$(printf '%s' "$line" | grep -oE 'handle: 0x[0-9a-f]+' | sed 's/handle: //')
+        u=$(printf '%s' "$line" | grep -oE 'uuid: [0-9a-f-]+' | sed 's/uuid: //')
         if [ "$found" = "1" ]; then
             if printf '%s' "$u" | grep -qi "00002902"; then
                 result="$h"
@@ -152,7 +153,7 @@ wrish_gatttool_deep_read() {
     mapfile -t uuids < <(
         printf '%s\n' "$raw_chars" \
           | sed 's/\x1b\[[0-9;]*m//g' \
-          | grep -oP 'uuid: \K[0-9a-f-]+'
+          | grep -oE 'uuid: [0-9a-f-]+' | sed 's/uuid: //'
     )
 
     if [ ${#uuids[@]} -eq 0 ]; then
@@ -206,7 +207,7 @@ wrish_gatttool_deep_read() {
                 local hex_val
                 hex_val=$(printf '%s\n' "$buf" \
                     | sed 's/\x1b\[[0-9;]*m//g' \
-                    | grep -oP 'value: \K[0-9a-f ]+' \
+                    | grep -oE 'value: [0-9a-f ]+' | sed 's/value: //' \
                     | head -1 \
                     | sed 's/[[:space:]]*$//')
 

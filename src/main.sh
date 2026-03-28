@@ -69,6 +69,10 @@ main() {
               echo "  vibrate                   Vibrate the bracelet"
               echo "  find                      Ring/find the bracelet"
               echo "  raw <hex bytes...>        Send raw vendor command to FF02"
+              echo "  scan-cmds [OPTIONS]       Brute-force scan all 0x0A vendor commands"
+              echo "    --from <hex>            Start byte (default 00)"
+              echo "    --to   <hex>            End byte   (default ff)"
+              echo "    --sleep <secs>          Delay per command (default 1)"
               echo ""
               echo "DEVICE:"
               echo "  ${WRISH_DEVICE} — ${WRISH_MAC}"
@@ -133,6 +137,10 @@ main() {
       raw)
         shift
         wrish_router_raw "$@"
+        ;;
+      scan-cmds)
+        shift
+        wrish_router_scan_cmds "$@"
         ;;
       *)
         echo "Unknown command: $1. Run 'wrish --help' for usage." >&2

@@ -110,7 +110,7 @@ wrish_c60a82c_info() {
     local hex_bytes
     hex_bytes=$(printf '%s\n' "$raw" \
         | sed 's/\x1b\[[0-9;]*m//g' \
-        | grep -oP 'value: \K[0-9a-f ]+' \
+        | grep -oE 'value: [0-9a-f ]+' | sed 's/value: //' \
         | head -1 \
         | sed 's/[[:space:]]*$//')
 
@@ -208,6 +208,99 @@ wrish_c60a82c_raw() {
     wrish_c60a82c_send_vendor_cmd "raw" "$hex"
 }
 
+# Brute-force scan all single-byte commands on FF02 (frame: 0A 01 00 <byte> <chk>).
+# Uses --CMD-XX-- PTY echo sentinels to match each command to its FF01 response.
+# Args: [--from <hex>] [--to <hex>] [--sleep <secs>]
+wrish_c60a82c_scan_cmds() {
+    local from=0 to=255 delay=1
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from)  from=$(( 16#${2#0x} )); shift 2 ;;
+            --to)    to=$(( 16#${2#0x} )); shift 2 ;;
+            --sleep) delay="$2"; shift 2 ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    local mac="${WRISH_MAC}"
+    local total=$(( to - from + 1 ))
+    local eta=$(( 10 + 2 + total * delay ))
+
+    # connect + char-desc in one shot: if char-desc succeeds, we are connected
+    echo "[scan-cmds] connecting and resolving handles..." >&2
+    local char_desc attempt=1
+    while true; do
+        char_desc=$(wrish_gatttool_char_desc "$mac")
+        if printf '%s\n' "$char_desc" | grep -q "handle:"; then
+            break
+        fi
+        if [ "$attempt" -ge 3 ]; then
+            echo "[scan-cmds] ERROR: could not connect after ${attempt} attempts" >&2; return 1
+        fi
+        echo "[scan-cmds] no handles found — power cycle attempt ${attempt}/3..." >&2
+        wrish_gatttool_restart
+        attempt=$(( attempt + 1 ))
+    done
+    local ff01_handle ff01_cccd ff02_handle
+    ff01_handle=$(wrish_gatttool_find_handle "$char_desc" "$C60_A82C_UUID_NOTIFY")
+    ff01_cccd=$(wrish_gatttool_find_cccd   "$char_desc" "$ff01_handle")
+    ff02_handle=$(wrish_gatttool_find_handle "$char_desc" "$C60_A82C_UUID_WRITE")
+    if [ -z "$ff01_handle" ] || [ -z "$ff02_handle" ]; then
+        echo "[scan-cmds] ERROR: could not resolve handles" >&2; return 1
+    fi
+    echo "[scan-cmds] FF01=${ff01_handle} CCCD=${ff01_cccd} FF02=${ff02_handle}" >&2
+    echo "[scan-cmds] scanning 0x$(printf '%02x' $from)..0x$(printf '%02x' $to)" \
+         "(${total} cmds, ${delay}s/cmd, ~${eta}s total)" >&2
+
+    local output
+    output=$(
+        (
+            echo "connect ${mac}"
+            sleep 10
+            echo "char-write-req ${ff01_cccd} 01 00"
+            sleep 2
+            local b bytes chk hex step=0
+            for (( b=from; b<=to; b++ )); do
+                step=$(( b - from + 1 ))
+                printf '[scan-cmds] %d/%d  cmd 0x%02x  frame: 0a 01 00 %02x ...\r' \
+                    "$step" "$total" "$b" "$b" >&2
+                bytes=(10 1 0 $b)
+                chk=$(wrish_c60a82c_checksum "${bytes[@]}")
+                hex=$(wrish_c60a82c_to_gatttool_hex "${bytes[@]}" "$chk")
+                echo "--CMD-$(printf '%02x' $b)--"
+                echo "char-write-cmd ${ff02_handle} ${hex}"
+                sleep "$delay"
+            done
+            printf '\n' >&2
+        ) | script -q -c "gatttool -I" /dev/null 2>&1
+    )
+
+    # Parse: --CMD-XX-- marker (echoed by PTY) → track current cmd
+    # Notification handle line → print match
+    echo ""
+    echo "=== SCAN RESULTS (0x$(printf '%02x' $from)..0x$(printf '%02x' $to)) ==="
+    local current_cmd=""
+    local hits=0
+    while IFS= read -r line; do
+        local clean
+        clean=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g')
+        if printf '%s' "$clean" | grep -qE -- '--CMD-[0-9a-f]{2}--'; then
+            current_cmd=$(printf '%s' "$clean" \
+                | sed 's/.*--CMD-\([0-9a-f][0-9a-f]\)--.*/\1/')
+        fi
+        if printf '%s' "$clean" | grep -qi "notification handle" && [ -n "$current_cmd" ]; then
+            local hex_val
+            hex_val=$(printf '%s' "$clean" \
+                | sed 's/.*value: \([0-9a-f ]*\)/\1/' \
+                | sed 's/[[:space:]]*$//')
+            printf 'CMD 0x%s  frame: 0a 01 00 %s ...  response: %s\n' \
+                "$current_cmd" "$current_cmd" "$hex_val"
+            hits=$(( hits + 1 ))
+        fi
+    done <<< "$output"
+    echo "=== ${hits} command(s) responded ==="
+}
+
 # Read battery level via vendor command on FF02, response on FF01 notification.
 # Query: 03 01 00 00 b2  — battery % in byte[3] of the notification payload.
 # Args: [--mac <mac>]
@@ -259,7 +352,7 @@ wrish_c60a82c_battery() {
     fi
 
     local hex_bytes
-    hex_bytes=$(printf '%s' "$notif_line" | grep -oP 'value: \K[0-9a-f ]+' | head -1)
+    hex_bytes=$(printf '%s' "$notif_line" | grep -oE 'value: [0-9a-f ]+' | sed 's/value: //' | head -1)
     echo "Battery response: ${hex_bytes}"
     local battery
     battery=$(printf '%s\n' "$hex_bytes" | awk '{print strtonum("0x" $4)}')
@@ -391,7 +484,7 @@ wrish_c60a82c_notify() {
     local ack_found=0
     while IFS= read -r line; do
         local hex_val
-        hex_val=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | grep -oP 'value: \K[0-9a-f ]+')
+        hex_val=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | grep -oE 'value: [0-9a-f ]+' | sed 's/value: //')
         [ -z "$hex_val" ] && continue
         local first_byte stage_byte
         first_byte=$(printf '%s\n' "$hex_val" | awk '{print $1}')
@@ -456,7 +549,7 @@ wrish_c60a82c_heart_rate_monitor() {
         | grep -i "notification" \
         | while IFS= read -r line; do
             local raw bpm
-            raw=$(printf '%s' "$line" | grep -oP 'value: \K[0-9a-f ]+' | head -1)
+            raw=$(printf '%s' "$line" | grep -oE 'value: [0-9a-f ]+' | sed 's/value: //' | head -1)
             # GATT 0x2A37: byte[0]=flags, byte[1]=bpm (uint8 format when flags bit0=0)
             bpm=$(printf '%d' "0x$(printf '%s\n' "$raw" | awk '{print $2}')" 2>/dev/null) || continue
             echo "Heart rate: ${bpm} bpm"
