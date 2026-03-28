@@ -302,7 +302,8 @@ wrish_c60a82c_scan_cmds() {
 
 # Read battery level via vendor command on FF02, response on FF01 notification.
 # Query: CMD_GET_CURRENT_POWER = 27 00 00 74
-# Response: 27 01 00 [percent%] [chk] — battery % is byte[3].
+# Response on FF01: a7 01 00 [percent%] [chk]  (response byte = 0x80|0x27 = 0xa7)
+# battery % is byte[3] (0-indexed). Validated via proxy: a7 01 00 43 4c → 67%.
 # Args: [--mac <mac>]
 wrish_c60a82c_battery() {
     local mac="${WRISH_MAC}"
@@ -353,25 +354,24 @@ wrish_c60a82c_battery() {
         ) | script -q -c "gatttool -I" /dev/null 2>&1
     )
 
-    local notif_line
-    notif_line=$(printf '%s\n' "$output" \
+    # Filter for the battery response specifically: notification value starting with "a7"
+    local hex_bytes
+    hex_bytes=$(printf '%s\n' "$output" \
         | sed 's/\x1b\[[0-9;]*m//g' \
         | grep -i "notification" \
+        | grep -oE 'value: [0-9a-f ]+' \
+        | sed 's/value: //' \
+        | awk '$1 == "a7"' \
         | head -1)
 
-    if [ -z "$notif_line" ]; then
-        echo "No response from device for battery query" >&2
+    if [ -z "$hex_bytes" ]; then
+        echo "[battery] no battery response (a7 ...) received" >&2
         return 1
     fi
 
-    local hex_bytes
-    hex_bytes=$(printf '%s' "$notif_line" | grep -oE 'value: [0-9a-f ]+' | sed 's/value: //' | head -1)
-    echo "Battery response: ${hex_bytes}"
     local battery
     battery=$(printf '%s\n' "$hex_bytes" | awk '{print strtonum("0x" $4)}')
-    if [ -n "$battery" ] && [ "$battery" -gt 0 ] 2>/dev/null; then
-        echo "Battery: ${battery}%"
-    fi
+    echo "Battery: ${battery}%"
 }
 
 # Send a notification to the bracelet via gatttool.
