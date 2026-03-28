@@ -55,8 +55,15 @@ def checksum(bs):
 
 
 def frame_set_device_state(state_payload):
-    """Build CMD_SET_DEVICE_STATE with byte[14] of payload forced to 0x02."""
+    """Build CMD_SET_DEVICE_STATE.
+
+    Flags forced from proxy log analysis:
+      payload[8]  = 0x01  notifications enabled (0x00 = disabled)
+      payload[14] = 0x02  session active flag
+    """
     payload = list(state_payload)
+    if len(payload) >= 9:
+        payload[8] = 0x01
     if len(payload) >= 15:
         payload[14] = 0x02
     bs = [0x02, len(payload) & 0xFF, (len(payload) >> 8) & 0xFF] + payload
@@ -92,6 +99,11 @@ def frame_msg2(kind, text, max_len):
 END_MESSAGE = [0x0A, 0x01, 0x00, 0x03, 0x0E]
 
 CMD_GET_DEVICE_STATE = [0x02, 0x00, 0x00, 0x06]
+
+# Enable all app notifications — payload ff ff ff ff.
+# CMD_GET_NOTICE response: 89 04 00 [4-byte mask] [chk]  (ff ff ff ff = all enabled)
+# We always send the all-enabled mask so the target app is guaranteed visible.
+CMD_SET_NOTICE_ALL = [0x09, 0x04, 0x00, 0xff, 0xff, 0xff, 0xff, 0x60]
 
 
 # ─── BlueZ helpers ────────────────────────────────────────────────────────────
@@ -176,6 +188,7 @@ def send_notification(mac, app_name, title, body, hci="hci0", do_init=True):
     #   "get_state"  → waiting for CMD_GET_DEVICE_STATE response (0x82, len>1)
     #   "set_state"  → waiting for CMD_SET_DEVICE_STATE ACK     (0x82, len=1)
     #   "set_time"   → waiting for CMD_SET_TIME ACK             (0x84, len=1)
+    #   "set_notice" → waiting for CMD_SET_NOTICE ACK           (0x89, len=1)
     #   "notify"     → notification stages 0..3
     state = {
         "phase": "get_state" if do_init else "notify",
@@ -228,7 +241,15 @@ def send_notification(mac, app_name, title, body, hci="hci0", do_init=True):
 
         # ── Init phase: CMD_SET_TIME ACK ──────────────────────────────────────
         if phase == "set_time" and first == 0x84 and length == 1:
-            print("[notify] CMD_SET_TIME ACK — init complete", file=sys.stderr)
+            print("[notify] CMD_SET_TIME ACK", file=sys.stderr)
+            state["phase"] = "set_notice"
+            print(f"[notify] sending CMD_SET_NOTICE (all enabled): {' '.join(f'{b:02x}' for b in CMD_SET_NOTICE_ALL)}", file=sys.stderr)
+            GLib.timeout_add(200, lambda: write_value(ff02, CMD_SET_NOTICE_ALL) or False)
+            return
+
+        # ── Init phase: CMD_SET_NOTICE ACK ────────────────────────────────────
+        if phase == "set_notice" and first == 0x89 and length == 1:
+            print("[notify] CMD_SET_NOTICE ACK — init complete", file=sys.stderr)
             state["phase"] = "notify"
             GLib.timeout_add(300, lambda: send_notify_stage(0) or False)
             return
