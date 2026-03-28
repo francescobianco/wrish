@@ -40,3 +40,27 @@ wrish_router_deep_read() {
         *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
     esac
 }
+
+# Route 'vibrate' to the correct device handler
+wrish_router_vibrate() {
+    case "${WRISH_DEVICE}" in
+        C60-A82C) wrish_c60a82c_vibrate "$@" ;;
+        *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
+    esac
+}
+
+# Route 'find' to the correct device handler
+wrish_router_find() {
+    case "${WRISH_DEVICE}" in
+        C60-A82C) wrish_c60a82c_find "$@" ;;
+        *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
+    esac
+}
+
+# Route 'raw' to the correct device handler
+wrish_router_raw() {
+    case "${WRISH_DEVICE}" in
+        C60-A82C) wrish_c60a82c_raw "$@" ;;
+        *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
+    esac
+}

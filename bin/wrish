@@ -13,7 +13,7 @@ set -e
 # @file_type: build-entrypoint
 # @build_type: bin
 # @build_with: Mush v0.2.0 (2026-03-21 develop)
-# @build_date: 2026-03-27T22:31:37Z
+# @build_date: 2026-03-28T00:28:46Z
 
 # @section_code: SC005
 # @section_name: functions
@@ -98,6 +98,9 @@ main() {
               echo "  heart-rate [OPTIONS]      Monitor heart rate"
               echo "    --duration <secs>       Listen duration (default 30s)"
               echo "  deep-read                 Read all GATT characteristics (raw dump)"
+              echo "  vibrate                   Vibrate the bracelet"
+              echo "  find                      Ring/find the bracelet"
+              echo "  raw <hex bytes...>        Send raw vendor command to FF02"
               echo ""
               echo "DEVICE:"
               echo "  ${WRISH_DEVICE} — ${WRISH_MAC}"
@@ -152,6 +155,16 @@ main() {
       deep-read)
         shift
         wrish_router_deep_read "$@"
+        ;;
+      vibrate)
+        wrish_router_vibrate
+        ;;
+      find)
+        wrish_router_find
+        ;;
+      raw)
+        shift
+        wrish_router_raw "$@"
         ;;
       *)
         echo "Unknown command: $1. Run 'wrish --help' for usage." >&2
@@ -587,7 +600,38 @@ module gatttool
 # Restart Bluetooth adapter to clear stale connections.
 wrish_gatttool_restart() {
     bluetoothctl power off > /dev/null 2>&1
+    sleep 2
     bluetoothctl power on  > /dev/null 2>&1
+    sleep 2
+}
+
+# Try to connect to device via gatttool and check for "Connection successful".
+# Args: <mac>  — Returns 0 if connected, 1 otherwise.
+wrish_gatttool_check_connected() {
+    local mac="$1"
+    local output
+    output=$(
+        (
+            echo "connect ${mac}"
+            sleep 10
+        ) | script -q -c "gatttool -I" /dev/null 2>&1
+    )
+    local clean
+    clean=$(printf '%s\n' "$output" | sed 's/\x1b\[[0-9;]*m//g')
+    echo "[conn] $(printf '%s\n' "$clean" | grep -E 'Attempting|Connection|Failed|Error' | tr '\n' ' ')" >&2
+    printf '%s\n' "$clean" | grep -q "Connection successful"
+}
+
+# Print every line of raw session output with a prefix, stripping ANSI.
+# Args: <output_string> <prefix>
+wrish_gatttool_dump_session() {
+    local output="$1"
+    local prefix="${2:-[session]}"
+    while IFS= read -r line; do
+        local clean
+        clean=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g')
+        [ -n "$clean" ] && echo "${prefix} ${clean}" >&2
+    done <<< "$output"
 }
 
 # Read a single GATT characteristic by UUID. Args: <mac> <uuid>
@@ -601,6 +645,59 @@ wrish_gatttool_read_uuid() {
         echo "char-read-uuid ${uuid}"
         sleep 3
     ) | script -q -c "gatttool -I" /dev/null 2>&1
+}
+
+# List all attribute handles (services, characteristics, descriptors). Args: <mac>
+# Returns raw gatttool output of char-desc.
+wrish_gatttool_char_desc() {
+    local mac="$1"
+    (
+        echo "connect ${mac}"
+        sleep 10
+        echo "char-desc"
+        sleep 3
+    ) | script -q -c "gatttool -I" /dev/null 2>&1
+}
+
+# Find the value handle for a given UUID from char-desc output.
+# Returns hex handle like "0x000e". Args: <char_desc_output> <uuid>
+wrish_gatttool_find_handle() {
+    local output="$1"
+    local uuid="$2"
+    printf '%s\n' "$output" \
+        | sed 's/\x1b\[[0-9;]*m//g' \
+        | grep -i "uuid: ${uuid}" \
+        | grep -oP 'handle: \K0x[0-9a-f]+' \
+        | head -1
+}
+
+# Find the CCCD (0x2902) handle immediately following a characteristic value handle.
+# Stops at the next characteristic declaration (0x2803). Args: <char_desc_output> <value_handle>
+wrish_gatttool_find_cccd() {
+    local output="$1"
+    local value_handle="$2"
+    local stripped found=0 result=""
+
+    stripped=$(printf '%s\n' "$output" \
+        | sed 's/\x1b\[[0-9;]*m//g' \
+        | grep -oP 'handle: 0x[0-9a-f]+, uuid: [0-9a-f-]+')
+
+    while IFS= read -r line; do
+        local h u
+        h=$(printf '%s' "$line" | grep -oP 'handle: \K0x[0-9a-f]+')
+        u=$(printf '%s' "$line" | grep -oP 'uuid: \K[0-9a-f-]+')
+        if [ "$found" = "1" ]; then
+            if printf '%s' "$u" | grep -qi "00002902"; then
+                result="$h"
+                break
+            fi
+            # Stop if we hit the next characteristic declaration
+            printf '%s' "$u" | grep -qi "00002803" && break
+        fi
+        [ "$h" = "$value_handle" ] && found=1
+    done <<< "$stripped"
+
+    printf '%s' "$result"
 }
 
 # List all GATT characteristics. Args: <mac>
@@ -887,14 +984,13 @@ wrish_c60a82c_build_set_message2() {
     echo "${frame[*]} $chk"
 }
 
-# Convert decimal byte array to bluetoothctl quoted hex string "0xXX 0xXX ..."
-wrish_c60a82c_to_hex_str() {
-    local result
+# Convert decimal byte array to gatttool hex string "xx xx xx" (lowercase, no 0x).
+wrish_c60a82c_to_gatttool_hex() {
+    local result=""
     local b
-    result=""
     for b in "$@"; do
         [ -n "$result" ] && result+=" "
-        result+="$(printf '0x%02X' $(( b )))"
+        result+="$(printf '%02x' $(( b )))"
     done
     echo "$result"
 }
@@ -963,12 +1059,88 @@ wrish_c60a82c_deep_read() {
     wrish_gatttool_deep_read "${WRISH_MAC}" "$@"
 }
 
-# Read battery level via vendor command on FF02, response on FF01.
-# The C60-A82C responds to command 0x03 0x01 0x00 0x00 <ck> with battery % in byte[4].
+# Send a single vendor command to FF02 and listen for response on FF01.
+# Handles connect + CCCD enable + write + dump.
+# Args: <label> <gatttool_hex_bytes>  e.g. "vibrate" "0a 01 00 04 64"
+wrish_c60a82c_send_vendor_cmd() {
+    local label="$1"
+    local hex="$2"
+    local mac="${WRISH_MAC}"
+
+    echo "[${label}] checking connection..." >&2
+    local attempt=1
+    while ! wrish_gatttool_check_connected "$mac"; do
+        if [ "$attempt" -ge 3 ]; then
+            echo "[${label}] ERROR: not connected after ${attempt} attempts" >&2
+            return 1
+        fi
+        echo "[${label}] not connected — power cycle attempt ${attempt}/3..." >&2
+        wrish_gatttool_restart
+        attempt=$(( attempt + 1 ))
+    done
+
+    echo "[${label}] resolving handles..." >&2
+    local char_desc
+    char_desc=$(wrish_gatttool_char_desc "$mac")
+
+    local ff01_handle ff01_cccd ff02_handle
+    ff01_handle=$(wrish_gatttool_find_handle "$char_desc" "$C60_A82C_UUID_NOTIFY")
+    ff01_cccd=$(wrish_gatttool_find_cccd   "$char_desc" "$ff01_handle")
+    ff02_handle=$(wrish_gatttool_find_handle "$char_desc" "$C60_A82C_UUID_WRITE")
+
+    if [ -z "$ff01_handle" ] || [ -z "$ff02_handle" ]; then
+        echo "[${label}] ERROR: could not resolve handles" >&2
+        return 1
+    fi
+    echo "[${label}] FF01=${ff01_handle} CCCD=${ff01_cccd} FF02=${ff02_handle}" >&2
+    echo "[${label}] sending: ${hex}" >&2
+
+    local output
+    output=$(
+        (
+            echo "connect ${mac}"
+            sleep 10
+            echo "char-write-req ${ff01_cccd} 01 00"
+            sleep 2
+            echo "char-write-req ${ff02_handle} ${hex}"
+            sleep 10
+        ) | script -q -c "gatttool -I" /dev/null 2>&1
+    )
+
+    echo "[${label}] session output:" >&2
+    wrish_gatttool_dump_session "$output" "[${label}]"
+}
+
+# Vibrate the bracelet (keephealth vendor cmd 0x04 under 0x0A family).
+# Frame: 0A 01 00 04 <chk>
+wrish_c60a82c_vibrate() {
+    local bytes=(10 1 0 4)
+    local chk; chk=$(wrish_c60a82c_checksum "${bytes[@]}")
+    local hex; hex=$(wrish_c60a82c_to_gatttool_hex "${bytes[@]}" "$chk")
+    wrish_c60a82c_send_vendor_cmd "vibrate" "$hex"
+}
+
+# Find / ring the bracelet (keephealth vendor cmd 0x06 under 0x0A family).
+# Frame: 0A 01 00 06 <chk>
+wrish_c60a82c_find() {
+    local bytes=(10 1 0 6)
+    local chk; chk=$(wrish_c60a82c_checksum "${bytes[@]}")
+    local hex; hex=$(wrish_c60a82c_to_gatttool_hex "${bytes[@]}" "$chk")
+    wrish_c60a82c_send_vendor_cmd "find" "$hex"
+}
+
+# Send raw hex bytes to FF02 and listen on FF01. Args: <hex_bytes...>
+# e.g.: wrish raw 0a 01 00 06 10
+wrish_c60a82c_raw() {
+    local hex="$*"
+    wrish_c60a82c_send_vendor_cmd "raw" "$hex"
+}
+
+# Read battery level via vendor command on FF02, response on FF01 notification.
+# Query: 03 01 00 00 b2  — battery % in byte[3] of the notification payload.
 # Args: [--mac <mac>]
 wrish_c60a82c_battery() {
-    local mac
-    mac="${WRISH_MAC}"
+    local mac="${WRISH_MAC}"
     while [ $# -gt 0 ]; do
         case "$1" in
             --mac) mac="$2"; shift 2 ;;
@@ -976,51 +1148,63 @@ wrish_c60a82c_battery() {
         esac
     done
 
-    wrish_gatt_open "$mac" || return 1
+    echo "[battery] resolving handles..." >&2
+    local char_desc
+    char_desc=$(wrish_gatttool_char_desc "$mac")
 
-    wrish_gatt_select "$C60_A82C_UUID_NOTIFY"
-    wrish_gatt_notify_on
+    local ff01_handle ff01_cccd ff02_handle
+    ff01_handle=$(wrish_gatttool_find_handle "$char_desc" "$C60_A82C_UUID_NOTIFY")
+    ff01_cccd=$(wrish_gatttool_find_cccd "$char_desc" "$ff01_handle")
+    ff02_handle=$(wrish_gatttool_find_handle "$char_desc" "$C60_A82C_UUID_WRITE")
 
-    wrish_gatt_select "$C60_A82C_UUID_WRITE"
+    if [ -z "$ff01_handle" ] || [ -z "$ff02_handle" ]; then
+        echo "error: could not resolve FF01/FF02 handles" >&2
+        return 1
+    fi
+    echo "[battery] FF01=${ff01_handle} CCCD=${ff01_cccd} FF02=${ff02_handle}" >&2
 
-    # Battery query command: 03 01 00 00 <checksum>
-    # checksum([3,1,0,0]) = ((4*0x56)+0x5A)&0xFF = 0xB2
-    wrish_gatt_send 'write "0x03 0x01 0x00 0x00 0xB2" 0 command'
+    local output
+    output=$(
+        (
+            echo "connect ${mac}"
+            sleep 10
+            echo "char-write-req ${ff01_cccd} 01 00"
+            sleep 1
+            echo "char-write-cmd ${ff02_handle} 03 01 00 00 b2"
+            sleep 5
+        ) | script -q -c "gatttool -I" /dev/null 2>&1
+    )
 
-    # Response on FF01: 83 02 00 <battery%> ...  (common pattern for keephealth devices)
-    local response
-    response=$(wrish_gatt_wait 'Value:' 8)
+    local notif_line
+    notif_line=$(printf '%s\n' "$output" \
+        | sed 's/\x1b\[[0-9;]*m//g' \
+        | grep -i "notification" \
+        | head -1)
 
-    wrish_gatt_close
-
-    if [ -n "$response" ]; then
-        # Extract the value bytes from the CHG line
-        local value_hex
-        value_hex=$(echo "$response" | grep -oP 'Value: \K[\da-f ]+' | head -1)
-        echo "Battery response: ${value_hex}"
-        # Battery % is typically in byte index 3 (0-indexed) for keephealth protocol
-        local battery
-        battery=$(echo "$value_hex" | awk '{print strtonum("0x" $4)}')
-        if [ -n "$battery" ] && [ "$battery" -gt 0 ] 2>/dev/null; then
-            echo "Battery: ${battery}%"
-        fi
-    else
+    if [ -z "$notif_line" ]; then
         echo "No response from device for battery query" >&2
         return 1
     fi
+
+    local hex_bytes
+    hex_bytes=$(printf '%s' "$notif_line" | grep -oP 'value: \K[0-9a-f ]+' | head -1)
+    echo "Battery response: ${hex_bytes}"
+    local battery
+    battery=$(printf '%s\n' "$hex_bytes" | awk '{print strtonum("0x" $4)}')
+    if [ -n "$battery" ] && [ "$battery" -gt 0 ] 2>/dev/null; then
+        echo "Battery: ${battery}%"
+    fi
 }
 
-# Send a notification to the bracelet via GATT coproc session with ACK waiting.
+# Send a notification to the bracelet via gatttool.
+# Protocol: enable notifications on FF01 CCCD, write 4-stage frames to FF02.
+# ACKs arrive as notifications on FF01; captured at end of session for display.
 # Args: [--mac <mac>] [--app <name>] --title <text> --body <text>
 wrish_c60a82c_notify() {
-    local mac
-    local app_name
-    local title
-    local body
-    mac="${WRISH_MAC}"
-    app_name="whatsapp"
-    title=""
-    body=""
+    local mac="${WRISH_MAC}"
+    local app_name="whatsapp"
+    local title=""
+    local body=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1032,64 +1216,136 @@ wrish_c60a82c_notify() {
         esac
     done
 
+    # Build frames
     local app_type
-    local msg_type_bytes
-    local title_bytes
-    local body_bytes
-    local hex
-
     app_type=$(wrish_c60a82c_app_type "$app_name")
+    local msg_type_bytes title_bytes body_bytes
     read -ra msg_type_bytes <<< "$(wrish_c60a82c_build_set_message_type "$app_type")"
     read -ra title_bytes    <<< "$(wrish_c60a82c_build_set_message2 1 "$title")"
     read -ra body_bytes     <<< "$(wrish_c60a82c_build_set_message2 2 "$body")"
 
-    wrish_gatt_open "$mac" || return 1
+    local msg_type_hex title_hex
+    msg_type_hex=$(wrish_c60a82c_to_gatttool_hex "${msg_type_bytes[@]}")
+    title_hex=$(wrish_c60a82c_to_gatttool_hex "${title_bytes[@]}")
 
-    wrish_gatt_select "$C60_A82C_UUID_NOTIFY"
-    wrish_gatt_notify_on
-    wrish_gatt_select "$C60_A82C_UUID_WRITE"
-
-    # Stage 0: setMessageType — wait for ACK 8A xx xx 00 xx xx
-    hex=$(wrish_c60a82c_to_hex_str "${msg_type_bytes[@]}")
-    echo "[notify] setMessageType (${app_name})" >&2
-    wrish_gatt_write_wait_ack "$hex" 0
-
-    # Stage 1: title
-    hex=$(wrish_c60a82c_to_hex_str "${title_bytes[@]}")
-    echo "[notify] title" >&2
-    wrish_gatt_write_wait_ack "$hex" 1
-
-    # Stage 2: body (may span multiple 20-byte chunks)
-    echo "[notify] body" >&2
-    local i n chunk_bytes chunk_hex chunk_size
-    chunk_size=20
-    i=0
-    n=${#body_bytes[@]}
+    # Body may span multiple 20-byte chunks
+    local body_chunks=() i=0 n=${#body_bytes[@]}
     while (( i < n )); do
-        chunk_bytes=("${body_bytes[@]:$i:$chunk_size}")
-        chunk_hex=$(wrish_c60a82c_to_hex_str "${chunk_bytes[@]}")
-        if (( i + chunk_size >= n )); then
-            wrish_gatt_write_wait_ack "$chunk_hex" 2
-        else
-            wrish_gatt_write_wait_ack "$chunk_hex"
-        fi
-        (( i += chunk_size ))
+        body_chunks+=("$(wrish_c60a82c_to_gatttool_hex "${body_bytes[@]:$i:20}")")
+        (( i += 20 ))
     done
 
-    # Stage 3: END_MESSAGE
-    echo "[notify] END_MESSAGE" >&2
-    wrish_gatt_write_wait_ack "0x0A 0x01 0x00 0x03 0x0E" 3
+    # Connection check with up to 3 power-cycle retries
+    echo "[notify] checking connection to ${mac}..." >&2
+    local attempt=1
+    while ! wrish_gatttool_check_connected "$mac"; do
+        if [ "$attempt" -ge 3 ]; then
+            echo "[notify] ERROR: device ${mac} not connected after ${attempt} attempts" >&2
+            return 1
+        fi
+        echo "[notify] not connected — power cycle attempt ${attempt}/3..." >&2
+        wrish_gatttool_restart
+        attempt=$(( attempt + 1 ))
+    done
+    echo "[notify] connected (attempt ${attempt})" >&2
 
-    wrish_gatt_close
-    echo "[notify] done" >&2
+    # Resolve GATT handles
+    echo "[notify] resolving handles..." >&2
+    local char_desc
+    char_desc=$(wrish_gatttool_char_desc "$mac")
+    echo "[notify] char-desc output:" >&2
+    wrish_gatttool_dump_session "$char_desc" "[char-desc]"
+
+    local ff01_handle ff01_cccd ff02_handle
+    ff01_handle=$(wrish_gatttool_find_handle "$char_desc" "$C60_A82C_UUID_NOTIFY")
+    ff01_cccd=$(wrish_gatttool_find_cccd   "$char_desc" "$ff01_handle")
+    ff02_handle=$(wrish_gatttool_find_handle "$char_desc" "$C60_A82C_UUID_WRITE")
+
+    if [ -z "$ff01_handle" ] || [ -z "$ff02_handle" ]; then
+        echo "[notify] ERROR: could not resolve FF01/FF02 handles" >&2
+        return 1
+    fi
+    echo "[notify] FF01=${ff01_handle} CCCD=${ff01_cccd} FF02=${ff02_handle}" >&2
+    echo "[notify] frames:" >&2
+    echo "[notify]   stage0 (setMessageType): ${msg_type_hex}" >&2
+    echo "[notify]   stage1 (title):          ${title_hex}" >&2
+    for i in "${!body_chunks[@]}"; do
+        echo "[notify]   stage2 (body chunk $i):   ${body_chunks[$i]}" >&2
+    done
+    echo "[notify]   stage3 (END_MESSAGE):    0a 01 00 03 0e" >&2
+
+    # One session: connect → enable notify → stage0..3.
+    # Use char-write-req for FF02: gatttool waits for the GATT Write Response
+    # before reading the next command, enforcing true stage sequencing.
+    # ACK notifications arrive on FF01 (pattern: 8A 02 00 <stage> 04 <chk>).
+    echo "[notify] starting session..." >&2
+    local output
+    output=$(
+        (
+            echo "connect ${mac}"
+            sleep 10
+            # Enable notifications on FF01 CCCD; wait for Write Response
+            echo "char-write-req ${ff01_cccd} 01 00"
+            sleep 2
+
+            # Stage 0: setMessageType
+            echo "char-write-req ${ff02_handle} ${msg_type_hex}"
+            sleep 5
+
+            # Stage 1: title
+            echo "char-write-req ${ff02_handle} ${title_hex}"
+            sleep 5
+
+            # Stage 2: body chunks
+            local chunk
+            for chunk in "${body_chunks[@]}"; do
+                echo "char-write-req ${ff02_handle} ${chunk}"
+                sleep 2
+            done
+            sleep 5
+
+            # Stage 3: END_MESSAGE — extra wait for final ACK
+            echo "char-write-req ${ff02_handle} 0a 01 00 03 0e"
+            sleep 15
+        ) | script -q -c "gatttool -I" /dev/null 2>&1
+    )
+
+    # Dump full session output
+    echo "[notify] full session output:" >&2
+    wrish_gatttool_dump_session "$output" "[session]"
+
+    # Parse ACK notifications (start with 8a, stage in byte[3])
+    local stage_names=("setMessageType" "title" "body" "END_MESSAGE")
+    local ack_found=0
+    while IFS= read -r line; do
+        local hex_val
+        hex_val=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | grep -oP 'value: \K[0-9a-f ]+')
+        [ -z "$hex_val" ] && continue
+        local first_byte stage_byte
+        first_byte=$(printf '%s\n' "$hex_val" | awk '{print $1}')
+        stage_byte=$(printf '%s\n' "$hex_val" | awk '{print $4}')
+        if [ "$first_byte" = "8a" ]; then
+            local stage_idx
+            stage_idx=$(( 16#${stage_byte:-ff} ))
+            local stage_name="${stage_names[$stage_idx]:-stage${stage_idx}}"
+            echo "[notify] ACK stage ${stage_idx} (${stage_name}): ${hex_val}" >&2
+            ack_found=$(( ack_found + 1 ))
+        fi
+    done < <(printf '%s\n' "$output" \
+        | sed 's/\x1b\[[0-9;]*m//g' \
+        | grep -i "notification")
+
+    if [ "$ack_found" -eq 0 ]; then
+        echo "[notify] WARNING: no ACK notifications received" >&2
+    else
+        echo "[notify] done (${ack_found}/4 ACKs)" >&2
+    fi
 }
 
-# Subscribe to heart rate notifications. Args: [--mac <mac>] [--duration <secs>]
+# Subscribe to heart rate notifications via gatttool. Args: [--mac <mac>] [--duration <secs>]
 wrish_c60a82c_heart_rate_monitor() {
-    local mac
-    local duration
-    mac="${WRISH_MAC}"
-    duration=30
+    local mac="${WRISH_MAC}"
+    local duration=30
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1099,15 +1355,40 @@ wrish_c60a82c_heart_rate_monitor() {
         esac
     done
 
-    wrish_gatt_open "$mac" || return 1
-    wrish_gatt_select "$C60_A82C_UUID_HR"
-    wrish_gatt_notify_on
-    wrish_gatt_wait 'Value:' "$duration" | grep -oP 'Value: \K[\da-f ]+' | while read -r raw; do
-        local bpm
-        bpm=$(printf '%d' "0x$(echo "$raw" | awk '{print $2}')" 2>/dev/null) || continue
-        echo "Heart rate: ${bpm} bpm"
-    done
-    wrish_gatt_close
+    echo "[heart-rate] resolving handles..." >&2
+    local char_desc
+    char_desc=$(wrish_gatttool_char_desc "$mac")
+
+    local hr_handle hr_cccd
+    hr_handle=$(wrish_gatttool_find_handle "$char_desc" "$C60_A82C_UUID_HR")
+    hr_cccd=$(wrish_gatttool_find_cccd "$char_desc" "$hr_handle")
+
+    if [ -z "$hr_handle" ]; then
+        echo "error: could not resolve HR handle" >&2
+        return 1
+    fi
+    echo "[heart-rate] HR=${hr_handle} CCCD=${hr_cccd} duration=${duration}s" >&2
+
+    local output
+    output=$(
+        (
+            echo "connect ${mac}"
+            sleep 10
+            echo "char-write-req ${hr_cccd} 01 00"
+            sleep "$duration"
+        ) | script -q -c "gatttool -I" /dev/null 2>&1
+    )
+
+    printf '%s\n' "$output" \
+        | sed 's/\x1b\[[0-9;]*m//g' \
+        | grep -i "notification" \
+        | while IFS= read -r line; do
+            local raw bpm
+            raw=$(printf '%s' "$line" | grep -oP 'value: \K[0-9a-f ]+' | head -1)
+            # GATT 0x2A37: byte[0]=flags, byte[1]=bpm (uint8 format when flags bit0=0)
+            bpm=$(printf '%d' "0x$(printf '%s\n' "$raw" | awk '{print $2}')" 2>/dev/null) || continue
+            echo "Heart rate: ${bpm} bpm"
+        done
 }
 
 # @section_code: SC007
@@ -1154,6 +1435,30 @@ wrish_router_battery() {
 wrish_router_deep_read() {
     case "${WRISH_DEVICE}" in
         C60-A82C) wrish_c60a82c_deep_read "$@" ;;
+        *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
+    esac
+}
+
+# Route 'vibrate' to the correct device handler
+wrish_router_vibrate() {
+    case "${WRISH_DEVICE}" in
+        C60-A82C) wrish_c60a82c_vibrate "$@" ;;
+        *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
+    esac
+}
+
+# Route 'find' to the correct device handler
+wrish_router_find() {
+    case "${WRISH_DEVICE}" in
+        C60-A82C) wrish_c60a82c_find "$@" ;;
+        *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
+    esac
+}
+
+# Route 'raw' to the correct device handler
+wrish_router_raw() {
+    case "${WRISH_DEVICE}" in
+        C60-A82C) wrish_c60a82c_raw "$@" ;;
         *) echo "Unknown device: ${WRISH_DEVICE}" >&2; return 1 ;;
     esac
 }

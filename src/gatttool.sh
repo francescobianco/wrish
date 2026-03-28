@@ -4,7 +4,38 @@ module gatttool
 # Restart Bluetooth adapter to clear stale connections.
 wrish_gatttool_restart() {
     bluetoothctl power off > /dev/null 2>&1
+    sleep 2
     bluetoothctl power on  > /dev/null 2>&1
+    sleep 2
+}
+
+# Try to connect to device via gatttool and check for "Connection successful".
+# Args: <mac>  — Returns 0 if connected, 1 otherwise.
+wrish_gatttool_check_connected() {
+    local mac="$1"
+    local output
+    output=$(
+        (
+            echo "connect ${mac}"
+            sleep 10
+        ) | script -q -c "gatttool -I" /dev/null 2>&1
+    )
+    local clean
+    clean=$(printf '%s\n' "$output" | sed 's/\x1b\[[0-9;]*m//g')
+    echo "[conn] $(printf '%s\n' "$clean" | grep -E 'Attempting|Connection|Failed|Error' | tr '\n' ' ')" >&2
+    printf '%s\n' "$clean" | grep -q "Connection successful"
+}
+
+# Print every line of raw session output with a prefix, stripping ANSI.
+# Args: <output_string> <prefix>
+wrish_gatttool_dump_session() {
+    local output="$1"
+    local prefix="${2:-[session]}"
+    while IFS= read -r line; do
+        local clean
+        clean=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g')
+        [ -n "$clean" ] && echo "${prefix} ${clean}" >&2
+    done <<< "$output"
 }
 
 # Read a single GATT characteristic by UUID. Args: <mac> <uuid>
@@ -18,6 +49,59 @@ wrish_gatttool_read_uuid() {
         echo "char-read-uuid ${uuid}"
         sleep 3
     ) | script -q -c "gatttool -I" /dev/null 2>&1
+}
+
+# List all attribute handles (services, characteristics, descriptors). Args: <mac>
+# Returns raw gatttool output of char-desc.
+wrish_gatttool_char_desc() {
+    local mac="$1"
+    (
+        echo "connect ${mac}"
+        sleep 10
+        echo "char-desc"
+        sleep 3
+    ) | script -q -c "gatttool -I" /dev/null 2>&1
+}
+
+# Find the value handle for a given UUID from char-desc output.
+# Returns hex handle like "0x000e". Args: <char_desc_output> <uuid>
+wrish_gatttool_find_handle() {
+    local output="$1"
+    local uuid="$2"
+    printf '%s\n' "$output" \
+        | sed 's/\x1b\[[0-9;]*m//g' \
+        | grep -i "uuid: ${uuid}" \
+        | grep -oP 'handle: \K0x[0-9a-f]+' \
+        | head -1
+}
+
+# Find the CCCD (0x2902) handle immediately following a characteristic value handle.
+# Stops at the next characteristic declaration (0x2803). Args: <char_desc_output> <value_handle>
+wrish_gatttool_find_cccd() {
+    local output="$1"
+    local value_handle="$2"
+    local stripped found=0 result=""
+
+    stripped=$(printf '%s\n' "$output" \
+        | sed 's/\x1b\[[0-9;]*m//g' \
+        | grep -oP 'handle: 0x[0-9a-f]+, uuid: [0-9a-f-]+')
+
+    while IFS= read -r line; do
+        local h u
+        h=$(printf '%s' "$line" | grep -oP 'handle: \K0x[0-9a-f]+')
+        u=$(printf '%s' "$line" | grep -oP 'uuid: \K[0-9a-f-]+')
+        if [ "$found" = "1" ]; then
+            if printf '%s' "$u" | grep -qi "00002902"; then
+                result="$h"
+                break
+            fi
+            # Stop if we hit the next characteristic declaration
+            printf '%s' "$u" | grep -qi "00002803" && break
+        fi
+        [ "$h" = "$value_handle" ] && found=1
+    done <<< "$stripped"
+
+    printf '%s' "$result"
 }
 
 # List all GATT characteristics. Args: <mac>

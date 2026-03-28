@@ -66,6 +66,9 @@ main() {
               echo "  heart-rate [OPTIONS]      Monitor heart rate"
               echo "    --duration <secs>       Listen duration (default 30s)"
               echo "  deep-read                 Read all GATT characteristics (raw dump)"
+              echo "  vibrate                   Vibrate the bracelet"
+              echo "  find                      Ring/find the bracelet"
+              echo "  raw <hex bytes...>        Send raw vendor command to FF02"
               echo ""
               echo "DEVICE:"
               echo "  ${WRISH_DEVICE} — ${WRISH_MAC}"
@@ -120,6 +123,16 @@ main() {
       deep-read)
         shift
         wrish_router_deep_read "$@"
+        ;;
+      vibrate)
+        wrish_router_vibrate
+        ;;
+      find)
+        wrish_router_find
+        ;;
+      raw)
+        shift
+        wrish_router_raw "$@"
         ;;
       *)
         echo "Unknown command: $1. Run 'wrish --help' for usage." >&2
