@@ -13,7 +13,7 @@ set -e
 # @file_type: build-entrypoint
 # @build_type: bin
 # @build_with: Mush v0.2.0 (2026-03-21 develop)
-# @build_date: 2026-03-28T01:18:58Z
+# @build_date: 2026-03-28T01:43:05Z
 
 # @section_code: SC005
 # @section_name: functions
@@ -1129,13 +1129,12 @@ wrish_c60a82c_vibrate() {
     wrish_c60a82c_send_vendor_cmd "vibrate" "$hex"
 }
 
-# Find / ring the bracelet (keephealth vendor cmd 0x06 under 0x0A family).
-# Frame: 0A 01 00 06 <chk>
+# Find / ring the bracelet — validated via proxy on 2026-03-28.
+# Fixed 20-byte frame (header 0x10, not the 0x0A family — no checksum byte).
+# Response on FF01: 90 01 00 00 10
 wrish_c60a82c_find() {
-    local bytes=(10 1 0 6)
-    local chk; chk=$(wrish_c60a82c_checksum "${bytes[@]}")
-    local hex; hex=$(wrish_c60a82c_to_gatttool_hex "${bytes[@]}" "$chk")
-    wrish_c60a82c_send_vendor_cmd "find" "$hex"
+    wrish_c60a82c_send_vendor_cmd "find" \
+        "10 08 00 00 00 00 00 01 00 00 00 c0 00 00 00 00 00 00 00 00"
 }
 
 # Send raw hex bytes to FF02 and listen on FF01. Args: <hex_bytes...>
