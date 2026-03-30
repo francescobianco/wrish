@@ -5,6 +5,7 @@ import sys
 
 from .config import load_config
 from .devices.c60_a82c import C60A82CDevice, DeviceError
+from .relay import run_relay
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     call.add_argument("--from", dest="caller", default="", help="Caller name")
     call.add_argument("--number", default="", help="Phone number")
     call.set_defaults(handler=_handle_call)
+
+    relay = subparsers.add_parser("relay", help="Expose local HTTP commands through a Hookpool .relay endpoint")
+    relay.add_argument("relay_url", help="Hookpool .relay URL")
+    relay.add_argument("--bind", default="127.0.0.1", help="Local bind address")
+    relay.add_argument("--port", default=8787, type=int, help="Local bind port, use 0 for auto")
+    relay.set_defaults(handler=_handle_relay)
 
     return parser
 
@@ -138,6 +145,18 @@ def _handle_call(args: argparse.Namespace) -> int:
     device = build_device(args)
     device.send_call(caller=args.caller, number=args.number, do_init=not args.no_init)
     print("Call sent")
+    return 0
+
+
+def _handle_relay(args: argparse.Namespace) -> int:
+    run_relay(
+        relay_url=args.relay_url,
+        mac=args.mac,
+        hci=args.hci,
+        bind=args.bind,
+        port=args.port,
+        debug=args.debug,
+    )
     return 0
 
 
