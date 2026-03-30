@@ -8,7 +8,7 @@ import time
 from .config import load_config
 from .devices.c60_a82c import C60A82CDevice, DeviceError
 from .relay import run_relay
-from .systemd import run_systemd_wizard
+from .systemd import follow_logs, run_systemd_wizard
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,6 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     sentinel.set_defaults(handler=_handle_sentinel)
 
     systemd = subparsers.add_parser("systemd", help="Interactive wizard that creates a user-level systemd service")
+    systemd.add_argument("--install", action="store_true", help="Force reinstall of the default wrish.service")
+    systemd.add_argument("--logs", action="store_true", help="Follow journal logs of wrish.service")
     systemd.set_defaults(handler=_handle_systemd)
 
     return parser
@@ -221,8 +223,10 @@ def _handle_sentinel(args: argparse.Namespace) -> int:
 
 
 def _handle_systemd(args: argparse.Namespace) -> int:
+    if args.logs:
+        return follow_logs()
     binary = str(Path.home() / ".local/bin/wrish")
-    service_path = run_systemd_wizard(binary)
+    service_path = run_systemd_wizard(binary, force_install=args.install)
     print(f"Systemd service created: {service_path}")
     return 0
 

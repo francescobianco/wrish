@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import shlex
+import subprocess
 
 
 def _prompt(text: str, default: str | None = None) -> str:
@@ -52,7 +53,14 @@ def render_service(config: SystemdConfig) -> str:
     )
 
 
-def run_systemd_wizard(default_binary: str) -> Path:
+def run_systemd_wizard(default_binary: str, *, force_install: bool = False) -> Path:
+    service_path = Path.home() / ".config/systemd/user/wrish.service"
+    if service_path.exists() and not force_install:
+        _show_existing_service_info(service_path)
+        if not _prompt_bool("Reinstall this service", False):
+            print("Nothing changed.")
+            return service_path
+
     print("wrish systemd wizard")
     print("This creates a user-level systemd service in ~/.config/systemd/user.")
     print("")
@@ -92,11 +100,61 @@ def run_systemd_wizard(default_binary: str) -> Path:
 
     print("")
     print(f"Written: {service_path}")
-    print("")
-    print("Next commands:")
-    print("  systemctl --user daemon-reload")
-    print(f"  systemctl --user enable --now {service_name}.service")
-    print(f"  systemctl --user status {service_name}.service")
-    print(f"  journalctl --user -u {service_name}.service -f")
+
+    _run_systemctl(["systemctl", "--user", "daemon-reload"])
+    _run_systemctl(["systemctl", "--user", "enable", "--now", f"{service_name}.service"])
+    _run_systemctl(["systemctl", "--user", "status", f"{service_name}.service"])
+
+    if _prompt_bool("Follow live logs now", False):
+        subprocess.run(["journalctl", "--user", "-u", f"{service_name}.service", "-f"], check=False)
 
     return service_path
+
+
+def _run_systemctl(command: list[str]) -> None:
+    print("")
+    print("$", _build_execstart(command))
+    completed = subprocess.run(command, check=False, text=True)
+    if completed.returncode != 0:
+        print(f"Command failed with exit code {completed.returncode}")
+
+
+def _show_existing_service_info(service_path: Path) -> None:
+    print("Existing wrish systemd service detected.")
+    print(f"Service file: {service_path}")
+
+    execstart = ""
+    description = ""
+    for line in service_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("Description="):
+            description = line.partition("=")[2]
+        elif line.startswith("ExecStart="):
+            execstart = line.partition("=")[2]
+
+    if description:
+        print(f"Description: {description}")
+    if execstart:
+        print(f"ExecStart: {execstart}")
+
+    service_name = service_path.name
+    active = _read_systemctl_output(["systemctl", "--user", "is-active", service_name])
+    enabled = _read_systemctl_output(["systemctl", "--user", "is-enabled", service_name])
+    if active:
+        print(f"Active: {active}")
+    if enabled:
+        print(f"Enabled: {enabled}")
+    print("")
+    print("Use `wrish systemd --install` to force a reinstall immediately.")
+
+
+def _read_systemctl_output(command: list[str]) -> str:
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    output = (completed.stdout or completed.stderr).strip()
+    return output
+
+
+def follow_logs(service_name: str = "wrish.service") -> int:
+    return subprocess.run(
+        ["journalctl", "--user", "-u", service_name, "-f"],
+        check=False,
+    ).returncode

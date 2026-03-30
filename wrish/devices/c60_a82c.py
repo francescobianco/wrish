@@ -37,6 +37,7 @@ PROPS_IFACE = "org.freedesktop.DBus.Properties"
 DEVICE_IFACE = "org.bluez.Device1"
 GATT_IFACE = "org.bluez.GattCharacteristic1"
 OM_IFACE = "org.freedesktop.DBus.ObjectManager"
+ADAPTER_IFACE = "org.bluez.Adapter1"
 
 FF01_UUID_PREFIX = "0000ff01"
 FF02_UUID_PREFIX = "0000ff02"
@@ -142,23 +143,148 @@ class C60A82CDevice:
     def is_connected(self) -> bool:
         try:
             bus, dbus_module = self._bus()
-            dev = bus.get_object(BLUEZ_SVC, self.device_path)
+            device_path = self._resolve_device_path(bus)
+            if not device_path:
+                return False
+            dev = bus.get_object(BLUEZ_SVC, device_path)
             props = dbus_module.Interface(dev, PROPS_IFACE)
             return bool(props.Get(DEVICE_IFACE, "Connected"))
         except Exception:
             return False
 
+    def status(self) -> dict[str, object]:
+        info: dict[str, object] = {
+            "mac": self.mac,
+            "hci": self.hci,
+            "device_path": self.device_path,
+            "present": False,
+            "connected": False,
+            "services_resolved": False,
+        }
+        try:
+            bus, dbus_module = self._bus()
+            adapter = bus.get_object(BLUEZ_SVC, self.adapter_path)
+            adapter_props = dbus_module.Interface(adapter, PROPS_IFACE)
+            info["adapter_present"] = True
+            try:
+                info["adapter_powered"] = bool(adapter_props.Get(ADAPTER_IFACE, "Powered"))
+            except Exception:
+                pass
+
+            device_path = self._resolve_device_path(bus)
+            if not device_path:
+                return info
+            info["device_path"] = device_path
+            dev = bus.get_object(BLUEZ_SVC, device_path)
+            props = dbus_module.Interface(dev, PROPS_IFACE)
+            info["present"] = True
+            info["connected"] = bool(props.Get(DEVICE_IFACE, "Connected"))
+            try:
+                info["name"] = str(props.Get(DEVICE_IFACE, "Name"))
+            except Exception:
+                pass
+            try:
+                info["alias"] = str(props.Get(DEVICE_IFACE, "Alias"))
+            except Exception:
+                pass
+            try:
+                info["paired"] = bool(props.Get(DEVICE_IFACE, "Paired"))
+            except Exception:
+                pass
+            try:
+                info["trusted"] = bool(props.Get(DEVICE_IFACE, "Trusted"))
+            except Exception:
+                pass
+            try:
+                info["rssi"] = int(props.Get(DEVICE_IFACE, "RSSI"))
+            except Exception:
+                pass
+
+            ff01_path = self._find_char(bus, FF01_UUID_PREFIX, device_path=device_path)
+            ff02_path = self._find_char(bus, FF02_UUID_PREFIX, device_path=device_path)
+            info["services_resolved"] = bool(ff01_path and ff02_path)
+            if ff01_path:
+                info["ff01_path"] = ff01_path
+            if ff02_path:
+                info["ff02_path"] = ff02_path
+        except Exception:
+            return info
+        return info
+
     def connect(self) -> None:
         bus, dbus_module = self._bus()
+        self._ensure_adapter_powered(bus, dbus_module)
         self._ensure_connected(bus, dbus_module)
 
-    def _find_char(self, bus, uuid_prefix: str) -> str | None:
+    @property
+    def adapter_path(self) -> str:
+        return f"/org/bluez/{self.hci}"
+
+    def _get_manager(self, bus, dbus_module):
+        return dbus_module.Interface(bus.get_object(BLUEZ_SVC, "/"), OM_IFACE)
+
+    def _resolve_device_path(self, bus) -> str | None:
         _dbus, _glib = _load_bluez_modules()
-        manager = _dbus.Interface(bus.get_object(BLUEZ_SVC, "/"), OM_IFACE)
+        manager = self._get_manager(bus, _dbus)
+        for path, interfaces in manager.GetManagedObjects().items():
+            if DEVICE_IFACE not in interfaces:
+                continue
+            if str(interfaces[DEVICE_IFACE].get("Address", "")).upper() != self.mac:
+                continue
+            return str(path)
+        return None
+
+    def _ensure_adapter_powered(self, bus, dbus_module) -> None:
+        adapter = bus.get_object(BLUEZ_SVC, self.adapter_path)
+        props = dbus_module.Interface(adapter, PROPS_IFACE)
+        try:
+            powered = bool(props.Get(ADAPTER_IFACE, "Powered"))
+        except Exception as exc:
+            raise DeviceError(f"Bluetooth adapter {self.hci} not available") from exc
+        if powered:
+            return
+        self._log(f"powering on adapter {self.hci}")
+        props.Set(ADAPTER_IFACE, "Powered", True)
+        for _ in range(20):
+            time.sleep(0.5)
+            if bool(props.Get(ADAPTER_IFACE, "Powered")):
+                return
+        raise DeviceError(f"Could not power on adapter {self.hci}")
+
+    def _discover_device_path(self, bus, dbus_module, timeout: float = 12.0) -> str | None:
+        adapter_obj = bus.get_object(BLUEZ_SVC, self.adapter_path)
+        adapter = dbus_module.Interface(adapter_obj, ADAPTER_IFACE)
+        start = time.monotonic()
+        started = False
+        try:
+            while time.monotonic() - start < timeout:
+                path = self._resolve_device_path(bus)
+                if path:
+                    return path
+                if not started:
+                    self._log(f"starting discovery on {self.hci}")
+                    try:
+                        adapter.StartDiscovery()
+                    except Exception:
+                        pass
+                    started = True
+                time.sleep(1.0)
+            return self._resolve_device_path(bus)
+        finally:
+            if started:
+                try:
+                    adapter.StopDiscovery()
+                except Exception:
+                    pass
+
+    def _find_char(self, bus, uuid_prefix: str, *, device_path: str | None = None) -> str | None:
+        _dbus, _glib = _load_bluez_modules()
+        manager = self._get_manager(bus, _dbus)
+        target_device_path = device_path or self._resolve_device_path(bus) or self.device_path
         for path, interfaces in manager.GetManagedObjects().items():
             if GATT_IFACE not in interfaces:
                 continue
-            if self.device_path not in str(path):
+            if target_device_path not in str(path):
                 continue
             uuid = str(interfaces[GATT_IFACE].get("UUID", ""))
             if uuid_prefix in uuid:
@@ -166,7 +292,13 @@ class C60A82CDevice:
         return None
 
     def _ensure_connected(self, bus, dbus_module) -> None:
-        dev = bus.get_object(BLUEZ_SVC, self.device_path)
+        device_path = self._resolve_device_path(bus)
+        if not device_path:
+            device_path = self._discover_device_path(bus, dbus_module)
+        if not device_path:
+            raise DeviceError(f"Could not find device {self.mac}")
+
+        dev = bus.get_object(BLUEZ_SVC, device_path)
         props = dbus_module.Interface(dev, PROPS_IFACE)
         if props.Get(DEVICE_IFACE, "Connected"):
             self._log("already connected")
@@ -184,9 +316,12 @@ class C60A82CDevice:
     def _resolve_paths(self, bus) -> tuple[str, str]:
         self._log("waiting for GATT services")
         ff01_path = ff02_path = None
+        device_path = self._resolve_device_path(bus)
+        if not device_path:
+            raise DeviceError(f"Could not resolve device path for {self.mac}")
         for _ in range(20):
-            ff01_path = self._find_char(bus, FF01_UUID_PREFIX)
-            ff02_path = self._find_char(bus, FF02_UUID_PREFIX)
+            ff01_path = self._find_char(bus, FF01_UUID_PREFIX, device_path=device_path)
+            ff02_path = self._find_char(bus, FF02_UUID_PREFIX, device_path=device_path)
             if ff01_path and ff02_path:
                 return ff01_path, ff02_path
             time.sleep(0.5)

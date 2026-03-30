@@ -89,6 +89,10 @@ class LocalCommandHandler(BaseHTTPRequestHandler):
         body = self._read_body()
 
         try:
+            if parsed.path == "/":
+                status = self.context.device().status()
+                self._json(200, {"ok": True, "service": "wrish-relay", "device": status})
+                return
             if parsed.path == "/health":
                 self._json(200, {"ok": True})
                 return
@@ -346,10 +350,11 @@ def run_relay(
     local_base_url = f"http://{bind}:{actual_port}"
     print(f"Local relay server: {local_base_url}")
     print(f"Public webhook URL: {public_base_url}")
-    print("Forwarded endpoints: /health, /battery, /find, /vibrate, /sms, /call, /notify")
+    print("Forwarded endpoints: /, /health, /battery, /find, /vibrate, /sms, /call, /notify")
     if sentinel:
         print("Sentinel: enabled")
     print("Examples:")
+    print(f"  curl '{public_base_url}/'")
     print(f"  curl '{public_base_url}/health'")
     print(f"  curl '{public_base_url}/battery'")
     print(f"  curl -X POST '{public_base_url}/find'")
