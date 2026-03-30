@@ -58,10 +58,15 @@ FIND_DEVICE_CMD = [
 CAMERA_MODE_ENTER_CMD = [0x10, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0]
 CAMERA_MODE_EXIT_CMD = [0x10, 0x08, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6C]
 CAMERA_BUTTON_EVENT = [0x90, 0x08, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16]
+CAMERA_BUTTON_DEDUP_SECONDS = 0.05
 
 
 class DeviceError(RuntimeError):
     pass
+
+
+def _is_in_progress_error(exc: Exception) -> bool:
+    return "org.bluez.Error.InProgress" in str(exc)
 
 
 def _load_bluez_modules():
@@ -119,6 +124,55 @@ def frame_message_part(kind: int, text: str, max_len: int) -> list[int]:
     payload_length = 1 + len(payload_bytes)
     frame = [0x0A, payload_length & 0xFF, (payload_length >> 8) & 0xFF, kind] + payload_bytes
     return frame + [checksum(frame)]
+
+
+def decode_dialer_symbols(symbols: list[str]) -> str | None:
+    armed = False
+    digits: list[str] = []
+    taps = 0
+
+    for symbol in symbols:
+        if not armed:
+            if symbol == "K":
+                armed = True
+            continue
+
+        if symbol == "T":
+            taps += 1
+            continue
+
+        if symbol != "K":
+            continue
+
+        if taps == 0:
+            return "".join(digits) if digits else None
+
+        digits.append(str(taps))
+        taps = 0
+
+    return None
+
+
+def format_calibration_report(press_times: list[float]) -> str:
+    if not press_times:
+        return "CALIBRATION\npresses=0\n"
+
+    base = press_times[0]
+    relative = [timestamp - base for timestamp in press_times]
+    deltas = [press_times[index] - press_times[index - 1] for index in range(1, len(press_times))]
+
+    lines = [
+        "CALIBRATION",
+        f"presses={len(press_times)}",
+        "relative_seconds=" + ",".join(f"{value:.3f}" for value in relative),
+        "delta_seconds=" + ",".join(f"{value:.3f}" for value in deltas) if deltas else "delta_seconds=",
+    ]
+
+    if deltas:
+        suggested_gap = max(deltas) + 0.25
+        lines.append(f"suggested_cluster_gap={suggested_gap:.3f}")
+
+    return "\n".join(lines) + "\n"
 
 
 @dataclass(slots=True)
@@ -333,7 +387,14 @@ class C60A82CDevice:
     def _write_value(self, ff02, frame: list[int], dbus_module) -> None:
         for index in range(0, len(frame), 20):
             chunk = frame[index:index + 20]
-            ff02.WriteValue(dbus_module.Array([dbus_module.Byte(b) for b in chunk], signature="y"), {})
+            for attempt in range(8):
+                try:
+                    ff02.WriteValue(dbus_module.Array([dbus_module.Byte(b) for b in chunk], signature="y"), {})
+                    break
+                except Exception as exc:
+                    if not _is_in_progress_error(exc) or attempt == 7:
+                        raise
+                    time.sleep(0.15)
             if index + 20 < len(frame):
                 time.sleep(0.1)
 
@@ -555,6 +616,7 @@ class C60A82CDevice:
         _dbus, GLib = _load_bluez_modules()
         loop = GLib.MainLoop()
         events = {"count": 0}
+        last_event_at = {"value": None}
 
         def on_changed(_iface, changed, _invalidated, path=None):
             if "Value" not in changed:
@@ -562,6 +624,11 @@ class C60A82CDevice:
             data = [int(byte) for byte in changed["Value"]]
             self._log(f"FF01: {' '.join(f'{b:02x}' for b in data)}")
             if data == CAMERA_BUTTON_EVENT:
+                now = time.monotonic()
+                previous = last_event_at["value"]
+                if previous is not None and (now - previous) < CAMERA_BUTTON_DEDUP_SECONDS:
+                    return
+                last_event_at["value"] = now
                 events["count"] += 1
                 print(f"Button event #{events['count']}")
                 if max_events is not None and events["count"] >= max_events:
@@ -599,3 +666,235 @@ class C60A82CDevice:
                 pass
 
         return int(events["count"])
+
+    def run_dialer(
+        self,
+        *,
+        arm_timeout: float = 5.0,
+        cluster_gap: float = 0.9,
+        k_min: int = 3,
+        k_max: int = 4,
+    ) -> str:
+        bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
+        _dbus, GLib = _load_bluez_modules()
+        loop = GLib.MainLoop()
+        started_at = time.monotonic()
+        last_press_at = {"value": None}
+        cluster_count = {"value": 0}
+        session = {"open": False, "open_t_count": 0, "exit_k_count": 0}
+        result = {"status": "timeout"}
+        feedback_messages: list[str] = []
+        last_event_at = {"value": None}
+
+        def send_open_feedback() -> None:
+            self._log(f"sending {' '.join(f'{b:02x}' for b in FIND_DEVICE_CMD)}")
+            self._write_value(ff02, FIND_DEVICE_CMD, dbus_module)
+            time.sleep(0.8)
+            self._log(f"sending {' '.join(f'{b:02x}' for b in FIND_DEVICE_CMD)}")
+            self._write_value(ff02, FIND_DEVICE_CMD, dbus_module)
+
+        def flush_cluster() -> None:
+            count = cluster_count["value"]
+            if count <= 0:
+                return
+
+            symbol = None
+            if count == 1:
+                symbol = "T"
+            elif k_min <= count <= k_max:
+                symbol = "K"
+
+            cluster_count["value"] = 0
+            last_press_at["value"] = None
+
+            if symbol is None:
+                self._log(f"ignoring cluster of {count} button presses")
+                if not session["open"]:
+                    print(f"Dialer exited: invalid opening cluster ({count} presses)")
+                    result["status"] = "invalid-opening-cluster"
+                    loop.quit()
+                return
+
+            print(symbol)
+
+            if not session["open"]:
+                if symbol != "T":
+                    print("Dialer exited: expected T T T to open the session")
+                    result["status"] = "expected-opening-t"
+                    loop.quit()
+                    return
+
+                session["open_t_count"] += 1
+                print(f"OPEN {session['open_t_count']}/3")
+                if session["open_t_count"] >= 3:
+                    session["open"] = True
+                    session["exit_k_count"] = 0
+                    print("SESSION OPEN")
+                    send_open_feedback()
+                return
+
+            print(f"TRACE {symbol}")
+            if symbol == "K":
+                session["exit_k_count"] += 1
+                if session["exit_k_count"] >= 2:
+                    print("SESSION CLOSE")
+                    feedback_messages.append("dialer off")
+                    result["status"] = "closed"
+                    loop.quit()
+            else:
+                session["exit_k_count"] = 0
+
+        def on_changed(_iface, changed, _invalidated, path=None):
+            if "Value" not in changed:
+                return
+            data = [int(byte) for byte in changed["Value"]]
+            self._log(f"FF01: {' '.join(f'{b:02x}' for b in data)}")
+            if data != CAMERA_BUTTON_EVENT:
+                return
+
+            now = time.monotonic()
+            previous_event = last_event_at["value"]
+            if previous_event is not None and (now - previous_event) < CAMERA_BUTTON_DEDUP_SECONDS:
+                return
+            last_event_at["value"] = now
+            previous = last_press_at["value"]
+            if previous is not None and now - previous > cluster_gap:
+                flush_cluster()
+
+            cluster_count["value"] += 1
+            last_press_at["value"] = now
+
+        def heartbeat():
+            if result["status"] != "timeout":
+                return False
+
+            now = time.monotonic()
+            last = last_press_at["value"]
+            if last is not None and now - last > cluster_gap:
+                flush_cluster()
+                if result["status"] != "timeout":
+                    return False
+
+            if not session["open"] and now - started_at > arm_timeout:
+                print("Dialer timeout: T T T not received")
+                result["status"] = "open-timeout"
+                loop.quit()
+                return False
+
+            return True
+
+        bus.add_signal_receiver(
+            on_changed,
+            signal_name="PropertiesChanged",
+            dbus_interface=PROPS_IFACE,
+            path=ff01_path,
+            path_keyword="path",
+        )
+
+        def run():
+            ff01.StartNotify()
+            time.sleep(0.3)
+            self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_ENTER_CMD)}")
+            self._write_value(ff02, CAMERA_MODE_ENTER_CMD, dbus_module)
+            GLib.timeout_add(100, heartbeat)
+
+        GLib.timeout_add(200, run)
+        try:
+            loop.run()
+        finally:
+            try:
+                self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_EXIT_CMD)}")
+                self._write_value(ff02, CAMERA_MODE_EXIT_CMD, dbus_module)
+                time.sleep(0.3)
+            except Exception:
+                pass
+            try:
+                ff01.StopNotify()
+            except Exception:
+                pass
+
+        for message in feedback_messages:
+            try:
+                self.send_notification(
+                    app_name="whatsapp",
+                    title="wrish",
+                    body=message,
+                    do_init=True,
+                )
+            except Exception as exc:
+                self._log(f"feedback message failed: {exc}")
+
+        return str(result["status"])
+
+    def calibrate_button_cluster(
+        self,
+        *,
+        timeout: float = 8.0,
+        idle_gap: float = 1.2,
+    ) -> str:
+        bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
+        _dbus, GLib = _load_bluez_modules()
+        loop = GLib.MainLoop()
+        press_times: list[float] = []
+        report = {"text": ""}
+        last_event_at = {"value": None}
+
+        def finish() -> None:
+            if report["text"]:
+                return
+            report["text"] = format_calibration_report(press_times)
+            loop.quit()
+
+        def on_changed(_iface, changed, _invalidated, path=None):
+            if "Value" not in changed:
+                return
+            data = [int(byte) for byte in changed["Value"]]
+            self._log(f"FF01: {' '.join(f'{b:02x}' for b in data)}")
+            if data != CAMERA_BUTTON_EVENT:
+                return
+            now = time.monotonic()
+            previous = last_event_at["value"]
+            if previous is not None and (now - previous) < CAMERA_BUTTON_DEDUP_SECONDS:
+                return
+            last_event_at["value"] = now
+            press_times.append(now)
+            print(f"press #{len(press_times)}")
+
+        def heartbeat():
+            if press_times and (time.monotonic() - press_times[-1]) > idle_gap:
+                finish()
+                return False
+            return True
+
+        bus.add_signal_receiver(
+            on_changed,
+            signal_name="PropertiesChanged",
+            dbus_interface=PROPS_IFACE,
+            path=ff01_path,
+            path_keyword="path",
+        )
+
+        def run():
+            ff01.StartNotify()
+            time.sleep(0.3)
+            self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_ENTER_CMD)}")
+            self._write_value(ff02, CAMERA_MODE_ENTER_CMD, dbus_module)
+            GLib.timeout_add(100, heartbeat)
+            GLib.timeout_add(int(timeout * 1000), lambda: finish() or False)
+
+        GLib.timeout_add(200, run)
+        try:
+            loop.run()
+        finally:
+            try:
+                self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_EXIT_CMD)}")
+                self._write_value(ff02, CAMERA_MODE_EXIT_CMD, dbus_module)
+                time.sleep(0.3)
+            except Exception:
+                pass
+            try:
+                ff01.StopNotify()
+            except Exception:
+                pass
+
+        return report["text"] or format_calibration_report(press_times)

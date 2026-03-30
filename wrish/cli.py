@@ -6,7 +6,11 @@ import sys
 import time
 
 from .config import load_config
-from .devices.c60_a82c import C60A82CDevice, DeviceError
+from .devices.c60_a82c import (
+    C60A82CDevice,
+    DeviceError,
+    decode_dialer_symbols,
+)
 from .relay import run_relay
 from .systemd import follow_logs, run_systemd_wizard
 
@@ -77,6 +81,20 @@ def build_parser() -> argparse.ArgumentParser:
     button.add_argument("--timeout", type=float, default=None, help="Stop listening after N seconds")
     button.add_argument("--count", type=int, default=None, help="Stop after N button events")
     button.set_defaults(handler=_handle_button)
+
+    dialer = subparsers.add_parser("dialer", help="Decode K/T button sequences into dialed numbers")
+    dialer.add_argument("--arm-timeout", type=float, default=10.0, help="Exit if the opening T T T sequence is not received in time")
+    dialer.add_argument("--cluster-gap", type=float, default=0.5, help="Max gap in seconds between presses of the same cluster")
+    dialer.add_argument("--k-min", type=int, default=4, help="Minimum fast presses to classify a cluster as K")
+    dialer.add_argument("--k-max", type=int, default=4, help="Maximum fast presses to classify a cluster as K")
+    dialer.add_argument(
+        "--simulate",
+        default=None,
+        help="Test parser with a synthetic sequence like 'K T K T T K K'",
+    )
+    dialer.add_argument("--calibrate", action="store_true", help="Capture one raw K cluster and print timing data")
+    dialer.add_argument("--timeout", type=float, default=8.0, help="Calibration/listen timeout in seconds")
+    dialer.set_defaults(handler=_handle_dialer)
 
     relay = subparsers.add_parser("relay", help="Expose local HTTP commands through a Hookpool .relay endpoint")
     relay.add_argument("relay_url", help="Hookpool .relay URL")
@@ -201,6 +219,38 @@ def _handle_button(args: argparse.Namespace) -> int:
     print("Listening for bracelet button events...")
     count = device.listen_for_button(timeout=args.timeout, max_events=args.count)
     print(f"Button events received: {count}")
+    return 0
+
+
+def _handle_dialer(args: argparse.Namespace) -> int:
+    if args.calibrate:
+        device = build_device(args)
+        print("Dialer calibration: perform one K cluster now.")
+        print("When finished, paste the output back here.")
+        report = device.calibrate_button_cluster(timeout=args.timeout)
+        print(report, end="")
+        return 0
+
+    if args.simulate:
+        symbols = [part for part in args.simulate.split() if part]
+        result = decode_dialer_symbols(symbols)
+        if result is None:
+            print("No number decoded")
+        else:
+            print(f"N {result}")
+        return 0
+
+    device = build_device(args)
+    print("Dialer listening...")
+    print("Open sequence: T T T")
+    print("Close sequence after open: K K")
+    status = device.run_dialer(
+        arm_timeout=args.arm_timeout,
+        cluster_gap=args.cluster_gap,
+        k_min=args.k_min,
+        k_max=args.k_max,
+    )
+    print(f"Dialer status: {status}")
     return 0
 
 

@@ -41,6 +41,7 @@ wrish notify --app whatsapp --title "Mario" --body "Ciao"
 wrish sms --from "+39123456789" --body "ciao come stai?"
 wrish call --from "Mario" --number "+39123456789"
 wrish button
+wrish dialer
 wrish sentinel
 wrish relay https://www.hookpool.com/xxxx/xxxx.relay --sentinel
 wrish systemd
@@ -58,12 +59,37 @@ wrish raw 27 00 00 74
 - `sms`
 - `call`
 - `button`
+- `dialer`
 - `sentinel`
 - `relay`
 - `systemd`
 - `raw`
 
 `wrish button` enters the bracelet camera/shutter mode, listens for button press events, and sends the validated stop command when it exits.
+
+`wrish dialer` decodes button sequences where a fast cluster is `K` and an isolated press is `T`.
+
+Current calibrated defaults for this bracelet:
+
+- `K` = 4 fast presses
+- `cluster-gap` = `0.5s`
+- opening `T T T` timeout = `10s`
+
+Current live session flow:
+
+- `T T T` opens the dialer session
+- bracelet gets a long confirmation vibration (double vibrate)
+- inside the session `wrish` traces every `T` and `K`
+- `K K` closes the session
+- bracelet receives the message `dialer off`
+
+Examples:
+
+```shell
+wrish dialer --calibrate
+wrish dialer --simulate 'K T T K K'      # N 2
+wrish dialer --simulate 'K T K T T K K'  # N 12
+```
 
 `wrish vibrate --seconds 300` repeats the bracelet vibration for coverage/range testing. You can also tune the interval:
 
