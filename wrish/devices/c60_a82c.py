@@ -353,6 +353,9 @@ class C60A82CDevice:
             matcher=lambda data: len(data) >= 1 and data[0] == 0x90,
         )
 
+    def vibrate(self) -> None:
+        self.find_device()
+
     def send_raw_hex(self, hex_bytes: list[str]) -> list[int] | None:
         try:
             frame = [int(part, 16) for part in hex_bytes]

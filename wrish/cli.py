@@ -39,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     find = subparsers.add_parser("find", help="Ring the bracelet")
     find.set_defaults(handler=_handle_find)
 
+    vibrate = subparsers.add_parser("vibrate", help="Trigger bracelet vibration")
+    vibrate.set_defaults(handler=_handle_vibrate)
+
     raw = subparsers.add_parser("raw", help="Send raw hex bytes to FF02")
     raw.add_argument("bytes", nargs="+", help="Hex bytes, for example: 0a 01 00 06 10")
     raw.set_defaults(handler=_handle_raw)
@@ -92,6 +95,13 @@ def _handle_find(args: argparse.Namespace) -> int:
     device = build_device(args)
     device.find_device()
     print("Bracelet found (vibrating)")
+    return 0
+
+
+def _handle_vibrate(args: argparse.Namespace) -> int:
+    device = build_device(args)
+    device.vibrate()
+    print("Vibration sent")
     return 0
 
 
