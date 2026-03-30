@@ -26,6 +26,20 @@ def _decode_payload(body: str, is_base64: bool) -> bytes:
     return body.encode("utf-8")
 
 
+def _ensure_trailing_newline(payload: bytes, content_type: str) -> bytes:
+    lowered = content_type.lower()
+    is_textual = (
+        lowered.startswith("text/")
+        or "json" in lowered
+        or "xml" in lowered
+        or "javascript" in lowered
+        or lowered == ""
+    )
+    if is_textual and not payload.endswith(b"\n"):
+        return payload + b"\n"
+    return payload
+
+
 def _filtered_headers(headers: dict[str, str]) -> dict[str, str]:
     excluded = {
         "host",
@@ -146,7 +160,7 @@ class LocalCommandHandler(BaseHTTPRequestHandler):
         return raw.decode("utf-8", errors="replace")
 
     def _json(self, status: int, payload: dict[str, Any]) -> None:
-        body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=True).encode("utf-8") + b"\n"
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -253,7 +267,8 @@ class HookpoolRelay:
 
         try:
             with request.urlopen(local_request, timeout=35) as response:
-                response_body = response.read()
+                content_type = response.headers.get("Content-Type", "")
+                response_body = _ensure_trailing_newline(response.read(), content_type)
                 payload, body_base64 = _coerce_text(response_body)
                 return {
                     "status": response.status,
@@ -262,7 +277,8 @@ class HookpoolRelay:
                     "body_base64": body_base64,
                 }
         except error.HTTPError as exc:
-            response_body = exc.read()
+            content_type = exc.headers.get("Content-Type", "")
+            response_body = _ensure_trailing_newline(exc.read(), content_type)
             payload, body_base64 = _coerce_text(response_body)
             return {
                 "status": exc.code,
@@ -299,6 +315,7 @@ def run_relay(
         raise DeviceError("Relay URL must point to a .relay endpoint")
 
     actual_port = port if port != 0 else pick_free_port(bind)
+    public_base_url = relay_url[:-6]
     context = RelayContext(mac=mac, hci=hci, debug=debug, lock=threading.Lock())
     server = LocalCommandServer((bind, actual_port), context)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -306,8 +323,15 @@ def run_relay(
 
     local_base_url = f"http://{bind}:{actual_port}"
     print(f"Local relay server: {local_base_url}")
-    print(f"Relay endpoint: {relay_url}")
+    print(f"Public webhook URL: {public_base_url}")
     print("Forwarded endpoints: /health, /battery, /find, /vibrate, /sms, /call, /notify")
+    print("Examples:")
+    print(f"  curl '{public_base_url}/health'")
+    print(f"  curl '{public_base_url}/battery'")
+    print(f"  curl -X POST '{public_base_url}/find'")
+    print(f"  curl -X POST '{public_base_url}/sms?from=asasasd' -d 'ciao'")
+    print(f"  curl -X POST '{public_base_url}/call?from=Mario&number=+39123456789'")
+    print(f"  curl -X POST '{public_base_url}/notify?app=whatsapp&title=Ciao' -d 'messaggio'")
 
     relay = HookpoolRelay(relay_url=relay_url, local_base_url=local_base_url, debug=debug)
     try:
