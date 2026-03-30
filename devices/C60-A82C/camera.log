@@ -1,0 +1,56 @@
+23:32:17.995  [upstream] connected to A4:C1:38:9A:A8:2C
+23:32:17.999  [upstream] FF01=/org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service000c/char000d
+23:32:17.999  [upstream] FF02=/org/bluez/hci0/dev_A4_C1_38_9A_A8_2C/service000c/char0010
+23:32:18.400  [upstream] subscribed to FF01 notifications
+23:32:18.503  [peripheral] registering GATT application...
+23:32:18.513  [peripheral] GATT application registered
+23:32:18.528  [peripheral] advertising as 'C60-A82C'
+23:32:18.528  ============================================================
+23:32:18.528  Proxy active:
+23:32:18.528    bracelet  :  A4:C1:38:9A:A8:2C
+23:32:18.528    phone sees:  'C60-A82C' (this Linux adapter)
+23:32:18.528  Ctrl-C to stop
+23:32:18.528  ============================================================
+23:33:00.750  [peripheral] phone subscribed to FF01
+23:33:04.260  [phone → proxy]     FF02  43 00 00 dc
+23:33:04.260  [phone → bracelet]  FF02  43 00 00 dc
+23:33:08.403  [phone → proxy]     FF02  01 00 00 b0
+23:33:08.404  [phone → bracelet]  FF02  01 00 00 b0
+23:33:08.890  [bracelet → phone]  FF01  81 10 00 54 42 32 43 36 30 54 37 02 04 a4 c1 38 9a a8 2c 6e
+23:33:12.889  [phone → proxy]     FF02  01 00 00 b0
+23:33:12.890  [phone → bracelet]  FF02  01 00 00 b0
+23:33:13.097  [bracelet → phone]  FF01  81 10 00 54 42 32 43 36 30 54 37 02 04 a4 c1 38 9a a8 2c 6e
+23:33:16.351  [phone → proxy]     FF02  01 00 00 b0
+23:33:16.351  [phone → bracelet]  FF02  01 00 00 b0
+23:33:17.304  [phone → proxy]     FF02  02 00 00 06
+23:33:17.305  [phone → bracelet]  FF02  02 00 00 06
+23:33:17.468  [bracelet → phone]  FF01  81 10 00 54 42 32 43 36 30 54 37 02 04 a4 c1 38 9a a8 2c 6e
+23:33:17.469  [bracelet → phone]  FF01  82 10 00 64 05 00 0a 00 00 01 00 01 ff 00 00 00 00 00 00 5e
+23:33:17.618  [phone → proxy]     FF02  02 10 00 64 05 00 0a 00 00 01 00 01 ff 00 00 00 00 02 00 0a
+23:33:17.618  [phone → bracelet]  FF02  02 10 00 64 05 00 0a 00 00 01 00 01 ff 00 00 00 00 02 00 0a
+23:33:17.717  [bracelet → phone]  FF01  82 01 00 00 5c
+23:33:17.812  [phone → proxy]     FF02  04 08 00 ea 07 03 1e 17 21 11 00 f4
+23:33:17.813  [phone → bracelet]  FF02  04 08 00 ea 07 03 1e 17 21 11 00 f4
+23:33:17.964  [bracelet → phone]  FF01  84 01 00 00 08
+23:33:18.056  [phone → proxy]     FF02  03 07 00 00 14 aa 00 58 02 46 4a
+23:33:18.057  [phone → bracelet]  FF02  03 07 00 00 14 aa 00 58 02 46 4a
+23:33:18.212  [bracelet → phone]  FF01  83 01 00 00 b2
+23:33:18.299  [phone → proxy]     FF02  07 00 00 b4
+23:33:18.299  [phone → bracelet]  FF02  07 00 00 b4
+23:33:18.461  [bracelet → phone]  FF01  87 0e 00 00 00 01 10 27 00 01 2c 01 00 01 05 00 00 b0
+23:33:18.543  [phone → proxy]     FF02  09 00 00 60
+23:33:18.544  [phone → bracelet]  FF02  09 00 00 60
+23:33:18.707  [bracelet → phone]  FF01  89 04 00 ff ff ff ff 60
+23:34:21.626  [phone → proxy]     FF02  10 08 00 00 00 01 00 00 00 00 00 c0
+23:34:21.626  [phone → bracelet]  FF02  10 08 00 00 00 01 00 00 00 00 00 c0
+23:34:23.139  [bracelet → phone]  FF01  90 01 00 00 10
+23:34:29.491  [bracelet → phone]  FF01  90 08 00 00 00 02 00 00 00 00 00 16
+23:34:32.215  [bracelet → phone]  FF01  90 08 00 00 00 02 00 00 00 00 00 16
+23:34:34.442  [bracelet → phone]  FF01  90 08 00 00 00 02 00 00 00 00 00 16
+23:34:36.422  [bracelet → phone]  FF01  90 08 00 00 00 02 00 00 00 00 00 16
+23:34:38.649  [bracelet → phone]  FF01  90 08 00 00 00 02 00 00 00 00 00 16
+23:34:46.157  [bracelet → phone]  FF01  90 08 00 00 00 02 00 00 00 00 00 16
+23:34:49.121  [phone → proxy]     FF02  10 08 00 00 00 03 00 00 00 00 00 6c
+23:34:49.122  [phone → bracelet]  FF02  10 08 00 00 00 03 00 00 00 00 00 6c
+23:34:50.447  [bracelet → phone]  FF01  90 08 00 00 00 03 00 00 00 00 00 6c
+23:34:50.447  [bracelet → phone]  FF01  90 01 00 00 10

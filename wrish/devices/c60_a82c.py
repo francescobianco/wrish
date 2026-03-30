@@ -55,6 +55,9 @@ FIND_DEVICE_CMD = [
     0x10, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
     0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ]
+CAMERA_MODE_ENTER_CMD = [0x10, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0]
+CAMERA_MODE_EXIT_CMD = [0x10, 0x08, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6C]
+CAMERA_BUTTON_EVENT = [0x90, 0x08, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16]
 
 
 class DeviceError(RuntimeError):
@@ -546,3 +549,53 @@ class C60A82CDevice:
             END_MESSAGE,
         ]
         self._run_notification_sequence(frames, do_init=do_init)
+
+    def listen_for_button(self, *, timeout: float | None = None, max_events: int | None = None) -> int:
+        bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
+        _dbus, GLib = _load_bluez_modules()
+        loop = GLib.MainLoop()
+        events = {"count": 0}
+
+        def on_changed(_iface, changed, _invalidated, path=None):
+            if "Value" not in changed:
+                return
+            data = [int(byte) for byte in changed["Value"]]
+            self._log(f"FF01: {' '.join(f'{b:02x}' for b in data)}")
+            if data == CAMERA_BUTTON_EVENT:
+                events["count"] += 1
+                print(f"Button event #{events['count']}")
+                if max_events is not None and events["count"] >= max_events:
+                    loop.quit()
+
+        bus.add_signal_receiver(
+            on_changed,
+            signal_name="PropertiesChanged",
+            dbus_interface=PROPS_IFACE,
+            path=ff01_path,
+            path_keyword="path",
+        )
+
+        def run():
+            ff01.StartNotify()
+            time.sleep(0.3)
+            self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_ENTER_CMD)}")
+            self._write_value(ff02, CAMERA_MODE_ENTER_CMD, dbus_module)
+            if timeout is not None:
+                GLib.timeout_add(int(timeout * 1000), loop.quit)
+
+        GLib.timeout_add(200, run)
+        try:
+            loop.run()
+        finally:
+            try:
+                self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_EXIT_CMD)}")
+                self._write_value(ff02, CAMERA_MODE_EXIT_CMD, dbus_module)
+                time.sleep(0.3)
+            except Exception:
+                pass
+            try:
+                ff01.StopNotify()
+            except Exception:
+                pass
+
+        return int(events["count"])

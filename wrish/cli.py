@@ -71,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     call.add_argument("--number", default="", help="Phone number")
     call.set_defaults(handler=_handle_call)
 
+    button = subparsers.add_parser("button", help="Listen for bracelet button events on FF01")
+    button.add_argument("--timeout", type=float, default=None, help="Stop listening after N seconds")
+    button.add_argument("--count", type=int, default=None, help="Stop after N button events")
+    button.set_defaults(handler=_handle_button)
+
     relay = subparsers.add_parser("relay", help="Expose local HTTP commands through a Hookpool .relay endpoint")
     relay.add_argument("relay_url", help="Hookpool .relay URL")
     relay.add_argument("--bind", default="127.0.0.1", help="Local bind address")
@@ -169,6 +174,14 @@ def _handle_call(args: argparse.Namespace) -> int:
     device = build_device(args)
     device.send_call(caller=args.caller, number=args.number, do_init=not args.no_init)
     print("Call sent")
+    return 0
+
+
+def _handle_button(args: argparse.Namespace) -> int:
+    device = build_device(args)
+    print("Listening for bracelet button events...")
+    count = device.listen_for_button(timeout=args.timeout, max_events=args.count)
+    print(f"Button events received: {count}")
     return 0
 
 

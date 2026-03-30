@@ -39,6 +39,7 @@ wrish find
 wrish notify --app whatsapp --title "Mario" --body "Ciao"
 wrish sms --from "+39123456789" --body "ciao come stai?"
 wrish call --from "Mario" --number "+39123456789"
+wrish button
 wrish sentinel
 wrish relay https://www.hookpool.com/xxxx/xxxx.relay --sentinel
 wrish systemd
@@ -54,10 +55,13 @@ wrish raw 27 00 00 74
 - `notify`
 - `sms`
 - `call`
+- `button`
 - `sentinel`
 - `relay`
 - `systemd`
 - `raw`
+
+`wrish button` enters the bracelet camera/shutter mode, listens for button press events, and sends the validated stop command when it exits.
 
 ## Sentinel
 
