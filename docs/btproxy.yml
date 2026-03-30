@@ -1,0 +1,551 @@
+openapi: 3.0.3
+info:
+  title: BT Proxy API
+  description: >
+    HTTP API exposed by the BT Proxy Android app to interact with connected
+    Bluetooth Low Energy devices. The server runs locally on the Android device
+    (default port 8080). Authenticated endpoints require the header `X-BtProxy`
+    with the configured auth token. BLE notifications are exposed through a
+    simple subscribe-plus-poll model: a client subscribes to a NOTIFY-capable
+    characteristic, then polls to consume queued notification events.
+  version: "1.1"
+
+servers:
+  - url: "http://{host}:{port}"
+    variables:
+      host:
+        default: "192.168.1.x"
+        description: IP address of the Android device on the local network
+      port:
+        default: "8080"
+        description: Port configured in the BT Proxy settings
+
+components:
+  securitySchemes:
+    BtProxyToken:
+      type: apiKey
+      in: header
+      name: X-BtProxy
+      description: Auth token configured in the BT Proxy settings (default "secret")
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid authentication token
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: "ERROR: Invalid authentication token"
+
+    NotFound:
+      description: Device not connected
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: "ERROR: Device not connected"
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: "ERROR: <message>"
+
+  schemas:
+    SubscribeRequest:
+      type: object
+      required: [clientId]
+      properties:
+        clientId:
+          type: string
+          description: >
+            Logical client identifier chosen by the caller. Each client has its
+            own subscription state and notification queue for the target
+            characteristic.
+          example: "dashboard-1"
+
+    SubscriptionResponse:
+      type: object
+      required: [macAddress, characteristicUuid, clientId, subscribed]
+      properties:
+        macAddress:
+          type: string
+          example: "AA:BB:CC:DD:EE:FF"
+        characteristicUuid:
+          type: string
+          example: "00002a37-0000-1000-8000-00805f9b34fb"
+        clientId:
+          type: string
+          example: "dashboard-1"
+        subscribed:
+          type: boolean
+          example: true
+        queueDepth:
+          type: integer
+          minimum: 0
+          description: Number of pending notification events currently queued for this client.
+          example: 0
+        mode:
+          type: string
+          description: Delivery mode used for notifications.
+          example: "poll"
+
+    PollResponse:
+      type: object
+      required: [macAddress, characteristicUuid, clientId, hasMessage, queueDepth]
+      properties:
+        macAddress:
+          type: string
+          example: "AA:BB:CC:DD:EE:FF"
+        characteristicUuid:
+          type: string
+          example: "00002a37-0000-1000-8000-00805f9b34fb"
+        clientId:
+          type: string
+          example: "dashboard-1"
+        hasMessage:
+          type: boolean
+          description: True when one notification event has been delivered in this response.
+          example: true
+        timestamp:
+          type: integer
+          format: int64
+          nullable: true
+          description: Server timestamp in milliseconds when the notify event was received.
+          example: 1711532400000
+        payloadHex:
+          type: string
+          nullable: true
+          description: Notification payload encoded as space-separated uppercase hex bytes.
+          example: "A0 81 D0"
+        queueDepth:
+          type: integer
+          minimum: 0
+          description: Number of notification events still pending for this client after this poll.
+          example: 2
+
+    UnsubscribeResponse:
+      type: object
+      required: [macAddress, characteristicUuid, clientId, subscribed]
+      properties:
+        macAddress:
+          type: string
+          example: "AA:BB:CC:DD:EE:FF"
+        characteristicUuid:
+          type: string
+          example: "00002a37-0000-1000-8000-00805f9b34fb"
+        clientId:
+          type: string
+          example: "dashboard-1"
+        subscribed:
+          type: boolean
+          example: false
+
+paths:
+
+  /ping:
+    get:
+      summary: Ping
+      description: Simple liveness check. No authentication required.
+      operationId: ping
+      tags: [Public]
+      responses:
+        "200":
+          description: Server is alive
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "pong"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /simple:
+    get:
+      summary: Simple status text
+      description: Returns a human-readable message confirming the server is running. No authentication required.
+      operationId: simple
+      tags: [Public]
+      responses:
+        "200":
+          description: Server running message
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "BT Proxy Server is running on port 8080"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /health:
+    get:
+      summary: Health check
+      description: Returns server health and the number of currently connected BLE devices. No authentication required.
+      operationId: health
+      tags: [Public]
+      responses:
+        "200":
+          description: Health status
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                status: healthy
+                server: running
+                connected_devices_count: 2
+                timestamp: 1711532400000
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /test:
+    get:
+      summary: Endpoint listing
+      description: Returns a plain-text list of all available public and authenticated endpoints. No authentication required.
+      operationId: test
+      tags: [Public]
+      responses:
+        "200":
+          description: Endpoint listing
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /status:
+    get:
+      summary: Server status
+      description: Returns server status and the MAC addresses of all connected BLE devices. No authentication required.
+      operationId: status
+      tags: [Public]
+      responses:
+        "200":
+          description: Server status with connected device list
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                status: running
+                connected_devices:
+                AA:BB:CC:DD:EE:FF
+                11:22:33:44:55:66
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /devices:
+    get:
+      summary: List connected devices
+      description: Returns a newline-separated list of MAC addresses of all currently connected BLE devices. Empty body if no devices are connected. No authentication required.
+      operationId: getDevices
+      tags: [Public]
+      responses:
+        "200":
+          description: Newline-separated MAC address list (empty if none)
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                AA:BB:CC:DD:EE:FF
+                11:22:33:44:55:66
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /devices/{macAddress}/characteristics:
+    get:
+      summary: List GATT characteristics
+      description: >
+        Returns all GATT services and characteristics discovered on a connected BLE device,
+        including the UUID and supported properties of each characteristic
+        (READ, WRITE, WRITE_NO_RESPONSE, NOTIFY, INDICATE, BROADCAST, SIGNED_WRITE).
+      operationId: listCharacteristics
+      tags: [Authenticated]
+      security:
+        - BtProxyToken: []
+      parameters:
+        - name: macAddress
+          in: path
+          required: true
+          description: MAC address of the BLE device (colon-separated, e.g. `AA:BB:CC:DD:EE:FF`)
+          schema:
+            type: string
+            example: "AA:BB:CC:DD:EE:FF"
+      responses:
+        "200":
+          description: >
+            Plain-text listing of services and characteristics.
+            Each service line is followed by its characteristics indented with two spaces.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                service: 0000180d-0000-1000-8000-00805f9b34fb
+                  characteristic: 00002a37-0000-1000-8000-00805f9b34fb properties: NOTIFY READ
+                  characteristic: 00002a38-0000-1000-8000-00805f9b34fb properties: READ
+                service: 00001800-0000-1000-8000-00805f9b34fb
+                  characteristic: 00002a00-0000-1000-8000-00805f9b34fb properties: READ WRITE
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /{macAddress}/{characteristicUuid}:
+    get:
+      summary: Read BLE characteristic
+      description: Reads the value of a GATT characteristic from a connected BLE device. Returns the raw bytes as space-separated uppercase hex (e.g. `A0 81 D0`).
+      operationId: readCharacteristic
+      tags: [Authenticated]
+      security:
+        - BtProxyToken: []
+      parameters:
+        - name: macAddress
+          in: path
+          required: true
+          description: MAC address of the BLE device (colon-separated, e.g. `AA:BB:CC:DD:EE:FF`)
+          schema:
+            type: string
+            example: "AA:BB:CC:DD:EE:FF"
+        - name: characteristicUuid
+          in: path
+          required: true
+          description: UUID of the GATT characteristic
+          schema:
+            type: string
+            example: "00002a37-0000-1000-8000-00805f9b34fb"
+      responses:
+        "200":
+          description: Space-separated hex bytes of the characteristic value
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "A0 81 D0"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    post:
+      summary: Write BLE characteristic
+      description: >
+        Writes a value to a GATT characteristic of a connected BLE device.
+        The request body must be a string of space-separated uppercase hex bytes,
+        e.g. `A0 81 D0`.
+      operationId: writeCharacteristic
+      tags: [Authenticated]
+      security:
+        - BtProxyToken: []
+      parameters:
+        - name: macAddress
+          in: path
+          required: true
+          description: MAC address of the BLE device (colon-separated, e.g. `AA:BB:CC:DD:EE:FF`)
+          schema:
+            type: string
+            example: "AA:BB:CC:DD:EE:FF"
+        - name: characteristicUuid
+          in: path
+          required: true
+          description: UUID of the GATT characteristic
+          schema:
+            type: string
+            example: "00002a37-0000-1000-8000-00805f9b34fb"
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+              description: Space-separated hex bytes to write
+              example: "A0 81 D0"
+      responses:
+        "200":
+          description: Write successful
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "OK"
+        "400":
+          description: Invalid data format
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "ERROR: Invalid data format. Use space-separated hex bytes (e.g., 'A0 81 D0')"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /{macAddress}/{characteristicUuid}/subscribe:
+    post:
+      summary: Subscribe to BLE notifications
+      description: >
+        Enables BLE notifications for a NOTIFY-capable characteristic and
+        registers a logical HTTP client to receive incoming notify events via
+        polling. Multiple clients can subscribe to the same characteristic; each
+        client receives its own queued copy of each incoming notification.
+      operationId: subscribeCharacteristic
+      tags: [Authenticated]
+      security:
+        - BtProxyToken: []
+      parameters:
+        - name: macAddress
+          in: path
+          required: true
+          description: MAC address of the BLE device (colon-separated, e.g. `AA:BB:CC:DD:EE:FF`)
+          schema:
+            type: string
+            example: "AA:BB:CC:DD:EE:FF"
+        - name: characteristicUuid
+          in: path
+          required: true
+          description: UUID of the GATT characteristic with NOTIFY support
+          schema:
+            type: string
+            example: "00002a37-0000-1000-8000-00805f9b34fb"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscribeRequest"
+      responses:
+        "200":
+          description: Subscription is active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionResponse"
+        "400":
+          description: Invalid request or characteristic does not support NOTIFY
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "ERROR: Characteristic does not support notify"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    delete:
+      summary: Unsubscribe from BLE notifications
+      description: >
+        Removes the logical HTTP client subscription for the target
+        characteristic. If the last client unsubscribes, the server may disable
+        BLE notifications on the characteristic.
+      operationId: unsubscribeCharacteristic
+      tags: [Authenticated]
+      security:
+        - BtProxyToken: []
+      parameters:
+        - name: macAddress
+          in: path
+          required: true
+          description: MAC address of the BLE device (colon-separated, e.g. `AA:BB:CC:DD:EE:FF`)
+          schema:
+            type: string
+            example: "AA:BB:CC:DD:EE:FF"
+        - name: characteristicUuid
+          in: path
+          required: true
+          description: UUID of the subscribed GATT characteristic
+          schema:
+            type: string
+            example: "00002a37-0000-1000-8000-00805f9b34fb"
+        - name: clientId
+          in: query
+          required: true
+          description: Logical client identifier used when subscribing
+          schema:
+            type: string
+            example: "dashboard-1"
+      responses:
+        "200":
+          description: Subscription removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnsubscribeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /{macAddress}/{characteristicUuid}/poll:
+    get:
+      summary: Poll next BLE notification
+      description: >
+        Returns the next queued notify event for the given subscribed client. If
+        no event is currently available, the server responds with `hasMessage:
+        false`. This keeps the transport simple while exposing NOTIFY semantics
+        over plain HTTP polling.
+      operationId: pollCharacteristicNotification
+      tags: [Authenticated]
+      security:
+        - BtProxyToken: []
+      parameters:
+        - name: macAddress
+          in: path
+          required: true
+          description: MAC address of the BLE device (colon-separated, e.g. `AA:BB:CC:DD:EE:FF`)
+          schema:
+            type: string
+            example: "AA:BB:CC:DD:EE:FF"
+        - name: characteristicUuid
+          in: path
+          required: true
+          description: UUID of the subscribed GATT characteristic
+          schema:
+            type: string
+            example: "00002a37-0000-1000-8000-00805f9b34fb"
+        - name: clientId
+          in: query
+          required: true
+          description: Logical client identifier used when subscribing
+          schema:
+            type: string
+            example: "dashboard-1"
+        - name: waitMs
+          in: query
+          required: false
+          description: >
+            Optional short polling wait in milliseconds. Allows future support
+            for lightweight long-polling without changing the route contract.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 30000
+            default: 0
+            example: 0
+      responses:
+        "200":
+          description: Poll result, with or without a delivered notification
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PollResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
