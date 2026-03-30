@@ -310,6 +310,11 @@ def run_relay(
     bind: str,
     port: int,
     debug: bool,
+    sentinel: bool,
+    sentinel_interval: float,
+    sentinel_app: str,
+    sentinel_title: str,
+    sentinel_body: str,
 ) -> None:
     if not relay_url.endswith(".relay"):
         raise DeviceError("Relay URL must point to a .relay endpoint")
@@ -321,10 +326,29 @@ def run_relay(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
+    sentinel_thread: threading.Thread | None = None
+    if sentinel:
+        sentinel_thread = threading.Thread(
+            target=_run_sentinel_loop,
+            kwargs={
+                "mac": mac,
+                "hci": hci,
+                "debug": debug,
+                "interval": sentinel_interval,
+                "app": sentinel_app,
+                "title": sentinel_title,
+                "body": sentinel_body,
+            },
+            daemon=True,
+        )
+        sentinel_thread.start()
+
     local_base_url = f"http://{bind}:{actual_port}"
     print(f"Local relay server: {local_base_url}")
     print(f"Public webhook URL: {public_base_url}")
     print("Forwarded endpoints: /health, /battery, /find, /vibrate, /sms, /call, /notify")
+    if sentinel:
+        print("Sentinel: enabled")
     print("Examples:")
     print(f"  curl '{public_base_url}/health'")
     print(f"  curl '{public_base_url}/battery'")
@@ -339,3 +363,40 @@ def run_relay(
     finally:
         server.shutdown()
         server.server_close()
+
+
+def _run_sentinel_loop(
+    *,
+    mac: str,
+    hci: str,
+    debug: bool,
+    interval: float,
+    app: str,
+    title: str,
+    body: str,
+) -> None:
+    device = C60A82CDevice(mac=mac, hci=hci, debug=debug)
+    announced = False
+
+    while True:
+        try:
+            connected = device.is_connected()
+            if not connected:
+                announced = False
+                if debug:
+                    print("[sentinel] attempting connection...")
+                device.connect()
+                connected = True
+
+            if connected and not announced:
+                if debug:
+                    print("[sentinel] connected, sending notification...")
+                device.send_notification(app_name=app, title=title, body=body, do_init=True)
+                print("Sentinel: bracelet connected")
+                announced = True
+        except Exception as exc:
+            announced = False
+            if debug:
+                print(f"[sentinel] {exc}")
+
+        time.sleep(max(interval, 0.2))

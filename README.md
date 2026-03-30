@@ -39,6 +39,9 @@ wrish find
 wrish notify --app whatsapp --title "Mario" --body "Ciao"
 wrish sms --from "+39123456789" --body "ciao come stai?"
 wrish call --from "Mario" --number "+39123456789"
+wrish sentinel
+wrish relay https://www.hookpool.com/xxxx/xxxx.relay --sentinel
+wrish systemd
 wrish relay https://hookpool.com/xxxx/xxxx.relay
 wrish raw 27 00 00 74
 ```
@@ -51,8 +54,38 @@ wrish raw 27 00 00 74
 - `notify`
 - `sms`
 - `call`
+- `sentinel`
 - `relay`
+- `systemd`
 - `raw`
+
+## Sentinel
+
+`wrish sentinel` e` un loop infinito che controlla il braccialetto, prova a riconnettersi quando cade e invia una notifica appena la connessione torna disponibile.
+
+Puoi anche abbinarlo al relay nello stesso processo:
+
+```shell
+wrish relay https://www.hookpool.com/braccialetto/7bgs3p.relay --sentinel
+```
+
+Questo e` il caso tipico da mettere sotto `systemd --user`, cosi` il processo resta in background e:
+
+- tiene attivo il relay HTTP verso Hookpool
+- tenta continuamente di riallacciare il BLE
+- manda il messaggio di avvenuta connessione al braccialetto
+
+## Systemd Wizard
+
+`wrish systemd` apre un piccolo wizard interattivo e crea un servizio user-level in `~/.config/systemd/user/`.
+
+Poi basta eseguire:
+
+```shell
+systemctl --user daemon-reload
+systemctl --user enable --now wrish.service
+journalctl --user -u wrish.service -f
+```
 
 ## Relay HTTP
 

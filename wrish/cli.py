@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import sys
+import time
 
 from .config import load_config
 from .devices.c60_a82c import C60A82CDevice, DeviceError
 from .relay import run_relay
+from .systemd import run_systemd_wizard
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,7 +75,26 @@ def build_parser() -> argparse.ArgumentParser:
     relay.add_argument("relay_url", help="Hookpool .relay URL")
     relay.add_argument("--bind", default="127.0.0.1", help="Local bind address")
     relay.add_argument("--port", default=8787, type=int, help="Local bind port, use 0 for auto")
+    relay.add_argument("--sentinel", action="store_true", help="Run sentinel monitoring in the same process")
+    relay.add_argument("--sentinel-interval", default=5.0, type=float, help="Sentinel check interval in seconds")
+    relay.add_argument("--sentinel-app", default="whatsapp", help="Notification app type used by sentinel")
+    relay.add_argument("--sentinel-title", default="wrish", help="Sentinel notification title")
+    relay.add_argument("--sentinel-body", default="Braccialetto connesso", help="Sentinel notification body")
     relay.set_defaults(handler=_handle_relay)
+
+    sentinel = subparsers.add_parser("sentinel", help="Keep reconnecting to the bracelet and announce when connected")
+    sentinel.add_argument("--interval", default=5.0, type=float, help="Seconds between connectivity checks")
+    sentinel.add_argument("--app", default="whatsapp", help="Notification app type used for the connection message")
+    sentinel.add_argument("--title", default="wrish", help="Notification title sent on successful connection")
+    sentinel.add_argument(
+        "--body",
+        default="Braccialetto connesso",
+        help="Notification body sent on successful connection",
+    )
+    sentinel.set_defaults(handler=_handle_sentinel)
+
+    systemd = subparsers.add_parser("systemd", help="Interactive wizard that creates a user-level systemd service")
+    systemd.set_defaults(handler=_handle_systemd)
 
     return parser
 
@@ -156,7 +178,52 @@ def _handle_relay(args: argparse.Namespace) -> int:
         bind=args.bind,
         port=args.port,
         debug=args.debug,
+        sentinel=args.sentinel,
+        sentinel_interval=args.sentinel_interval,
+        sentinel_app=args.sentinel_app,
+        sentinel_title=args.sentinel_title,
+        sentinel_body=args.sentinel_body,
     )
+    return 0
+
+
+def _handle_sentinel(args: argparse.Namespace) -> int:
+    device = build_device(args)
+    announced = False
+
+    while True:
+        try:
+            connected = device.is_connected()
+            if not connected:
+                announced = False
+                if args.debug:
+                    print("Sentinel: attempting connection...", file=sys.stderr)
+                device.connect()
+                connected = True
+
+            if connected and not announced:
+                if args.debug:
+                    print("Sentinel: connected, sending notification...", file=sys.stderr)
+                device.send_notification(
+                    app_name=args.app,
+                    title=args.title,
+                    body=args.body,
+                    do_init=True,
+                )
+                print("Sentinel: bracelet connected")
+                announced = True
+        except DeviceError as exc:
+            announced = False
+            if args.debug:
+                print(f"Sentinel: {exc}", file=sys.stderr)
+
+        time.sleep(max(args.interval, 0.2))
+
+
+def _handle_systemd(args: argparse.Namespace) -> int:
+    binary = str(Path.home() / ".local/bin/wrish")
+    service_path = run_systemd_wizard(binary)
+    print(f"Systemd service created: {service_path}")
     return 0
 
 

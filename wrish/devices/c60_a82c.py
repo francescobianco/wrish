@@ -139,6 +139,19 @@ class C60A82CDevice:
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         return dbus.SystemBus(), dbus
 
+    def is_connected(self) -> bool:
+        try:
+            bus, dbus_module = self._bus()
+            dev = bus.get_object(BLUEZ_SVC, self.device_path)
+            props = dbus_module.Interface(dev, PROPS_IFACE)
+            return bool(props.Get(DEVICE_IFACE, "Connected"))
+        except Exception:
+            return False
+
+    def connect(self) -> None:
+        bus, dbus_module = self._bus()
+        self._ensure_connected(bus, dbus_module)
+
     def _find_char(self, bus, uuid_prefix: str) -> str | None:
         _dbus, _glib = _load_bluez_modules()
         manager = _dbus.Interface(bus.get_object(BLUEZ_SVC, "/"), OM_IFACE)
