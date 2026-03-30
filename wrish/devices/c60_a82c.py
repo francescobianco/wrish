@@ -1,0 +1,397 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import datetime as dt
+import sys
+import time
+from typing import Callable
+
+
+APP_TYPES = {
+    "wechat": 2,
+    "qq": 3,
+    "facebook": 4,
+    "skype": 5,
+    "twitter": 6,
+    "whatsapp": 7,
+    "line": 8,
+    "linkedin": 9,
+    "instagram": 10,
+    "messenger": 12,
+    "vk": 13,
+    "viber": 14,
+    "telegram": 16,
+    "kakaotalk": 18,
+    "douyin": 32,
+    "kuaishou": 33,
+    "douyin_lite": 34,
+    "maimai": 52,
+    "pinduoduo": 53,
+    "work_wechat": 54,
+    "tantan": 56,
+    "taobao": 57,
+}
+
+BLUEZ_SVC = "org.bluez"
+PROPS_IFACE = "org.freedesktop.DBus.Properties"
+DEVICE_IFACE = "org.bluez.Device1"
+GATT_IFACE = "org.bluez.GattCharacteristic1"
+OM_IFACE = "org.freedesktop.DBus.ObjectManager"
+
+FF01_UUID_PREFIX = "0000ff01"
+FF02_UUID_PREFIX = "0000ff02"
+DEVICE_NAME_UUID_PREFIX = "00002a00"
+
+CMD_GET_DEVICE_STATE = [0x02, 0x00, 0x00, 0x06]
+CMD_SET_NOTICE_ALL = [0x09, 0x04, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x60]
+CMD_GET_CURRENT_POWER = [0x27, 0x00, 0x00, 0x74]
+END_MESSAGE = [0x0A, 0x01, 0x00, 0x03, 0x0E]
+
+APP_TYPE_CALL = 0x00
+APP_TYPE_SMS = 0x01
+
+FIND_DEVICE_CMD = [
+    0x10, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+]
+
+
+class DeviceError(RuntimeError):
+    pass
+
+
+def _load_bluez_modules():
+    try:
+        import dbus
+        import dbus.mainloop.glib
+        from gi.repository import GLib
+    except ImportError as exc:
+        raise DeviceError(
+            "Missing BlueZ Python dependencies. Install python3-dbus and python3-gi."
+        ) from exc
+    return dbus, GLib
+
+
+def checksum(frame: list[int]) -> int:
+    total = 0
+    for byte in frame:
+        total = (total + byte) & 0xFF
+    return ((total * 0x56) + 0x5A) & 0xFF
+
+
+def frame_set_device_state(state_payload: list[int]) -> list[int]:
+    payload = list(state_payload)
+    if len(payload) >= 9:
+        payload[8] = 0x01
+    if len(payload) >= 15:
+        payload[14] = 0x02
+    frame = [0x02, len(payload) & 0xFF, (len(payload) >> 8) & 0xFF] + payload
+    return frame + [checksum(frame)]
+
+
+def frame_set_time(now: dt.datetime | None = None) -> list[int]:
+    now = now or dt.datetime.now()
+    payload = [
+        now.year & 0xFF,
+        (now.year >> 8) & 0xFF,
+        now.month,
+        now.day,
+        now.hour,
+        now.minute,
+        now.second,
+        0x00,
+    ]
+    frame = [0x04, len(payload) & 0xFF, (len(payload) >> 8) & 0xFF] + payload
+    return frame + [checksum(frame)]
+
+
+def frame_message_type(app_type: int) -> list[int]:
+    frame = [0x0A, 0x02, 0x00, 0x00, app_type]
+    return frame + [checksum(frame)]
+
+
+def frame_message_part(kind: int, text: str, max_len: int) -> list[int]:
+    payload_bytes = list(text.encode("utf-8")[:max_len])
+    payload_length = 1 + len(payload_bytes)
+    frame = [0x0A, payload_length & 0xFF, (payload_length >> 8) & 0xFF, kind] + payload_bytes
+    return frame + [checksum(frame)]
+
+
+@dataclass(slots=True)
+class C60A82CDevice:
+    mac: str
+    hci: str = "hci0"
+    debug: bool = False
+
+    def __post_init__(self) -> None:
+        self.mac = self.mac.upper()
+
+    @property
+    def device_path(self) -> str:
+        return f"/org/bluez/{self.hci}/dev_{self.mac.replace(':', '_')}"
+
+    def _log(self, message: str) -> None:
+        if self.debug:
+            print(f"[wrish:{self.mac}] {message}", file=sys.stderr)
+
+    def _bus(self):
+        dbus, _glib = _load_bluez_modules()
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        return dbus.SystemBus(), dbus
+
+    def _find_char(self, bus, uuid_prefix: str) -> str | None:
+        _dbus, _glib = _load_bluez_modules()
+        manager = _dbus.Interface(bus.get_object(BLUEZ_SVC, "/"), OM_IFACE)
+        for path, interfaces in manager.GetManagedObjects().items():
+            if GATT_IFACE not in interfaces:
+                continue
+            if self.device_path not in str(path):
+                continue
+            uuid = str(interfaces[GATT_IFACE].get("UUID", ""))
+            if uuid_prefix in uuid:
+                return str(path)
+        return None
+
+    def _ensure_connected(self, bus, dbus_module) -> None:
+        dev = bus.get_object(BLUEZ_SVC, self.device_path)
+        props = dbus_module.Interface(dev, PROPS_IFACE)
+        if props.Get(DEVICE_IFACE, "Connected"):
+            self._log("already connected")
+            return
+
+        self._log(f"connecting via {self.hci}")
+        dbus_module.Interface(dev, DEVICE_IFACE).Connect()
+        for _ in range(30):
+            time.sleep(0.5)
+            if props.Get(DEVICE_IFACE, "Connected"):
+                self._log("connected")
+                return
+        raise DeviceError("Could not connect to device")
+
+    def _resolve_paths(self, bus) -> tuple[str, str]:
+        self._log("waiting for GATT services")
+        ff01_path = ff02_path = None
+        for _ in range(20):
+            ff01_path = self._find_char(bus, FF01_UUID_PREFIX)
+            ff02_path = self._find_char(bus, FF02_UUID_PREFIX)
+            if ff01_path and ff02_path:
+                return ff01_path, ff02_path
+            time.sleep(0.5)
+        raise DeviceError("FF01/FF02 characteristics not found")
+
+    def _write_value(self, ff02, frame: list[int], dbus_module) -> None:
+        for index in range(0, len(frame), 20):
+            chunk = frame[index:index + 20]
+            ff02.WriteValue(dbus_module.Array([dbus_module.Byte(b) for b in chunk], signature="y"), {})
+            if index + 20 < len(frame):
+                time.sleep(0.1)
+
+    def _with_vendor_chars(self):
+        bus, dbus_module = self._bus()
+        self._ensure_connected(bus, dbus_module)
+        ff01_path, ff02_path = self._resolve_paths(bus)
+        ff01 = dbus_module.Interface(bus.get_object(BLUEZ_SVC, ff01_path), GATT_IFACE)
+        ff02 = dbus_module.Interface(bus.get_object(BLUEZ_SVC, ff02_path), GATT_IFACE)
+        return bus, dbus_module, ff01_path, ff01, ff02
+
+    def _run_ff01_command(
+        self,
+        command: list[int],
+        *,
+        matcher: Callable[[list[int]], bool],
+        timeout_ms: int = 8000,
+    ) -> list[int]:
+        bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
+        _dbus, GLib = _load_bluez_modules()
+        result: dict[str, list[int]] = {}
+        loop = GLib.MainLoop()
+
+        def on_changed(_iface, changed, _invalidated, path=None):
+            if "Value" not in changed:
+                return
+            data = [int(byte) for byte in changed["Value"]]
+            self._log(f"FF01: {' '.join(f'{b:02x}' for b in data)}")
+            if matcher(data):
+                result["data"] = data
+                loop.quit()
+
+        bus.add_signal_receiver(
+            on_changed,
+            signal_name="PropertiesChanged",
+            dbus_interface=PROPS_IFACE,
+            path=ff01_path,
+            path_keyword="path",
+        )
+
+        def run():
+            ff01.StartNotify()
+            time.sleep(0.3)
+            self._log(f"sending {' '.join(f'{b:02x}' for b in command)}")
+            self._write_value(ff02, command, dbus_module)
+            GLib.timeout_add(timeout_ms, loop.quit)
+
+        GLib.timeout_add(200, run)
+        loop.run()
+
+        try:
+            ff01.StopNotify()
+        except Exception:
+            pass
+
+        if "data" not in result:
+            raise DeviceError("No response received (timeout)")
+        return result["data"]
+
+    def _run_notification_sequence(self, frames: list[list[int]], *, do_init: bool) -> None:
+        bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
+        _dbus, GLib = _load_bluez_modules()
+        state = {
+            "phase": "get_state" if do_init else "notify",
+            "notify_stage": 0,
+            "device_state_payload": [],
+        }
+        loop = GLib.MainLoop()
+
+        def send_notification_stage(stage: int) -> None:
+            frame = frames[stage]
+            self._log(f"sending stage {stage}: {' '.join(f'{b:02x}' for b in frame)}")
+            self._write_value(ff02, frame, dbus_module)
+
+        def on_changed(_iface, changed, _invalidated, path=None):
+            if "Value" not in changed:
+                return
+            data = [int(byte) for byte in changed["Value"]]
+            if not data:
+                return
+
+            first = data[0]
+            length = (data[2] << 8 | data[1]) if len(data) >= 3 else 0
+            self._log(f"FF01: {' '.join(f'{b:02x}' for b in data)}")
+            phase = state["phase"]
+
+            if phase == "get_state" and first == 0x82 and length > 1:
+                payload = data[3:-1]
+                state["device_state_payload"] = payload
+                state["phase"] = "set_state"
+                GLib.timeout_add(200, lambda: self._write_value(ff02, frame_set_device_state(payload), dbus_module) or False)
+                return
+
+            if phase == "set_state" and first == 0x82 and length == 1:
+                state["phase"] = "set_time"
+                GLib.timeout_add(200, lambda: self._write_value(ff02, frame_set_time(), dbus_module) or False)
+                return
+
+            if phase == "set_time" and first == 0x84 and length == 1:
+                state["phase"] = "set_notice"
+                GLib.timeout_add(200, lambda: self._write_value(ff02, CMD_SET_NOTICE_ALL, dbus_module) or False)
+                return
+
+            if phase == "set_notice" and first == 0x89 and length == 1:
+                state["phase"] = "notify"
+                GLib.timeout_add(200, lambda: send_notification_stage(0) or False)
+                return
+
+            if phase == "notify" and first == 0x8A and len(data) >= 4:
+                stage = data[3]
+                if stage != state["notify_stage"]:
+                    return
+                if stage >= len(frames) - 1:
+                    loop.quit()
+                    return
+                state["notify_stage"] += 1
+                GLib.timeout_add(200, lambda: send_notification_stage(state["notify_stage"]) or False)
+
+        bus.add_signal_receiver(
+            on_changed,
+            signal_name="PropertiesChanged",
+            dbus_interface=PROPS_IFACE,
+            path=ff01_path,
+            path_keyword="path",
+        )
+
+        def run():
+            ff01.StartNotify()
+            time.sleep(0.3)
+            if do_init:
+                self._write_value(ff02, CMD_GET_DEVICE_STATE, dbus_module)
+            else:
+                send_notification_stage(0)
+            GLib.timeout_add(12000, loop.quit)
+
+        GLib.timeout_add(200, run)
+        loop.run()
+
+        try:
+            ff01.StopNotify()
+        except Exception:
+            pass
+
+        if state["notify_stage"] != len(frames) - 1:
+            raise DeviceError("Notification sequence did not complete")
+
+    def read_info(self) -> dict[str, str]:
+        bus, dbus_module = self._bus()
+        self._ensure_connected(bus, dbus_module)
+        path = self._find_char(bus, DEVICE_NAME_UUID_PREFIX)
+        if not path:
+            raise DeviceError("Device name characteristic not found")
+        char = dbus_module.Interface(bus.get_object(BLUEZ_SVC, path), GATT_IFACE)
+        data = [int(byte) for byte in char.ReadValue({})]
+        name = bytes(data).split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+        return {"name": name}
+
+    def read_battery(self) -> int:
+        response = self._run_ff01_command(
+            CMD_GET_CURRENT_POWER,
+            matcher=lambda data: len(data) >= 4 and data[0] == 0xA7,
+        )
+        return int(response[3])
+
+    def find_device(self) -> None:
+        self._run_ff01_command(
+            FIND_DEVICE_CMD,
+            matcher=lambda data: len(data) >= 1 and data[0] == 0x90,
+        )
+
+    def send_raw_hex(self, hex_bytes: list[str]) -> list[int] | None:
+        try:
+            frame = [int(part, 16) for part in hex_bytes]
+        except ValueError as exc:
+            raise DeviceError("Raw bytes must be valid hex values") from exc
+
+        try:
+            return self._run_ff01_command(frame, matcher=lambda data: True, timeout_ms=5000)
+        except DeviceError as exc:
+            if "timeout" in str(exc).lower():
+                return None
+            raise
+
+    def send_notification(self, *, app_name: str, title: str, body: str, do_init: bool = True) -> None:
+        app_type = APP_TYPES.get(app_name.lower(), APP_TYPES["whatsapp"])
+        frames = [
+            frame_message_type(app_type),
+            frame_message_part(1, title, 32),
+            frame_message_part(2, body, 128),
+            END_MESSAGE,
+        ]
+        self._run_notification_sequence(frames, do_init=do_init)
+
+    def send_sms(self, *, sender: str, text: str, do_init: bool = True) -> None:
+        frames = [
+            frame_message_type(APP_TYPE_SMS),
+            frame_message_part(1, sender, 32),
+            frame_message_part(2, text, 128),
+            END_MESSAGE,
+        ]
+        self._run_notification_sequence(frames, do_init=do_init)
+
+    def send_call(self, *, caller: str, number: str, do_init: bool = True) -> None:
+        title = caller or number or "Unknown"
+        body = number if caller and number else ""
+        frames = [
+            frame_message_type(APP_TYPE_CALL),
+            frame_message_part(1, title, 32),
+            frame_message_part(2, body, 128),
+            END_MESSAGE,
+        ]
+        self._run_notification_sequence(frames, do_init=do_init)

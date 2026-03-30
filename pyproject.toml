@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wrish"
+version = "0.1.0"
+description = "Python CLI to control supported wristbands over BlueZ D-Bus"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Francesco" }
+]
+classifiers = [
+  "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.scripts]
+wrish = "wrish.cli:main"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["wrish*"]
