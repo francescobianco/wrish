@@ -44,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     find.set_defaults(handler=_handle_find)
 
     vibrate = subparsers.add_parser("vibrate", help="Trigger bracelet vibration")
+    vibrate.add_argument("--seconds", type=float, default=None, help="Repeat vibration for N seconds")
+    vibrate.add_argument("--interval", type=float, default=2.0, help="Seconds between vibration attempts in loop mode")
     vibrate.set_defaults(handler=_handle_vibrate)
 
     raw = subparsers.add_parser("raw", help="Send raw hex bytes to FF02")
@@ -136,8 +138,25 @@ def _handle_find(args: argparse.Namespace) -> int:
 
 def _handle_vibrate(args: argparse.Namespace) -> int:
     device = build_device(args)
-    device.vibrate()
-    print("Vibration sent")
+    if args.seconds is None:
+        device.vibrate()
+        print("Vibration sent")
+        return 0
+
+    deadline = time.monotonic() + max(args.seconds, 0.0)
+    interval = max(args.interval, 0.2)
+    count = 0
+
+    while time.monotonic() < deadline:
+        device.vibrate()
+        count += 1
+        remaining = max(0.0, deadline - time.monotonic())
+        print(f"Vibration #{count} sent, remaining {remaining:.1f}s")
+        if remaining <= 0:
+            break
+        time.sleep(min(interval, remaining))
+
+    print(f"Loop finished after {count} vibrations")
     return 0
 
 

@@ -36,6 +36,7 @@ WRISH_HCI=hci0
 wrish info
 wrish battery
 wrish find
+wrish vibrate --seconds 300
 wrish notify --app whatsapp --title "Mario" --body "Ciao"
 wrish sms --from "+39123456789" --body "ciao come stai?"
 wrish call --from "Mario" --number "+39123456789"
@@ -52,6 +53,7 @@ wrish raw 27 00 00 74
 - `info`
 - `battery`
 - `find`
+- `vibrate`
 - `notify`
 - `sms`
 - `call`
@@ -62,6 +64,12 @@ wrish raw 27 00 00 74
 - `raw`
 
 `wrish button` enters the bracelet camera/shutter mode, listens for button press events, and sends the validated stop command when it exits.
+
+`wrish vibrate --seconds 300` repeats the bracelet vibration for coverage/range testing. You can also tune the interval:
+
+```shell
+wrish vibrate --seconds 300 --interval 1
+```
 
 ## Sentinel
 
