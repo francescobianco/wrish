@@ -42,6 +42,8 @@ def render_service(config: SystemdConfig) -> str:
             "",
             "[Service]",
             "Type=simple",
+            "WorkingDirectory=%h",
+            "EnvironmentFile=-%h/.wrishrc",
             f"ExecStart={execstart}",
             "Restart=always",
             "RestartSec=5",
@@ -59,7 +61,7 @@ def run_systemd_wizard(default_binary: str, *, force_install: bool = False) -> P
         _show_existing_service_info(service_path)
         if not _prompt_bool("Reinstall this service", False):
             print("Nothing changed.")
-            return service_path
+            raise SystemExit(0)
 
     print("wrish systemd wizard")
     print("This creates a user-level systemd service in ~/.config/systemd/user.")
@@ -103,6 +105,7 @@ def run_systemd_wizard(default_binary: str, *, force_install: bool = False) -> P
 
     _run_systemctl(["systemctl", "--user", "daemon-reload"])
     _run_systemctl(["systemctl", "--user", "enable", "--now", f"{service_name}.service"])
+    _run_systemctl(["systemctl", "--user", "restart", f"{service_name}.service"])
     _run_systemctl(["systemctl", "--user", "status", f"{service_name}.service"])
 
     if _prompt_bool("Follow live logs now", False):
