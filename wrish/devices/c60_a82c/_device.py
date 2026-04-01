@@ -36,6 +36,7 @@ from ._constants import (
     FF01_UUID_PREFIX,
     FF02_UUID_PREFIX,
     FIND_DEVICE_CMD,
+    FIND_PHONE_EVENT,
     GATT_IFACE,
     OM_IFACE,
     PROPS_IFACE,
@@ -865,6 +866,72 @@ class C60A82CDevice:
                 time.sleep(0.3)
             except Exception:
                 pass
+            try:
+                ff01.StopNotify()
+            except Exception:
+                pass
+
+        if "error" in events:
+            raise DeviceError(f"Could not start BLE notifications: {events['error']}") from events["error"]
+        return int(events["count"])
+
+    def listen_for_find_phone(
+        self,
+        *,
+        timeout: float | None = None,
+        max_events: int | None = None,
+        on_event: Callable[[], None] | None = None,
+    ) -> int:
+        """Listen on FF01 for the bracelet's find-phone trigger.
+
+        The bracelet sends FIND_PHONE_EVENT spontaneously when the user activates
+        find-phone on the device.  No camera-mode handshake is needed — only an
+        FF01 notification subscription is required.
+
+        Matched as a prefix: the sniffed frame is 12 bytes but the documented
+        frame is 20 bytes; both start with the same FIND_PHONE_EVENT prefix.
+        """
+        bus, dbus_module, ff01_path, ff01, _ff02 = self._with_vendor_chars()
+        _dbus, GLib = _load_bluez_modules()
+        loop = GLib.MainLoop()
+        events: dict[str, object] = {"count": 0}
+        prefix = FIND_PHONE_EVENT
+
+        def on_changed(_iface, changed, _invalidated, path=None):
+            if "Value" not in changed:
+                return
+            data = [int(b) for b in changed["Value"]]
+            self._log(f"FF01: {' '.join(f'{b:02x}' for b in data)}")
+            if data[:len(prefix)] == prefix:
+                count = int(events["count"]) + 1
+                events["count"] = count
+                print(f"Find-phone event #{count}")
+                if on_event is not None:
+                    on_event()
+                if max_events is not None and count >= max_events:
+                    loop.quit()
+
+        bus.add_signal_receiver(
+            on_changed,
+            signal_name="PropertiesChanged",
+            dbus_interface=PROPS_IFACE,
+            path=ff01_path,
+            path_keyword="path",
+        )
+
+        def run():
+            try:
+                ff01.StartNotify()
+                if timeout is not None:
+                    GLib.timeout_add(int(timeout * 1000), loop.quit)
+            except Exception as exc:
+                events["error"] = exc
+                loop.quit()
+
+        GLib.timeout_add(200, run)
+        try:
+            loop.run()
+        finally:
             try:
                 ff01.StopNotify()
             except Exception:

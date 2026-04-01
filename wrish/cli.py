@@ -98,6 +98,13 @@ def build_parser() -> argparse.ArgumentParser:
     button.add_argument("--count", type=int, default=None, help="Stop after N button events")
     button.set_defaults(handler=_handle_button)
 
+    listen = subparsers.add_parser("listen", help="Listen for the bracelet find-phone trigger on FF01")
+    listen.add_argument("--timeout", type=float, default=None, help="Stop listening after N seconds")
+    listen.add_argument("--count", type=int, default=None, help="Stop after N events")
+    listen.add_argument("--no-sound", action="store_true", help="Do not play a ringtone on detection")
+    listen.add_argument("--exec", dest="exec_cmd", default=None, metavar="CMD", help="Shell command to run on each event")
+    listen.set_defaults(handler=_handle_listen)
+
     horn = subparsers.add_parser("horn", help="Play a horn sound on each bracelet button press")
     horn.add_argument("--timeout", type=float, default=None, help="Stop listening after N seconds")
     horn.add_argument("--count", type=int, default=None, help="Stop after N button events")
@@ -310,6 +317,62 @@ def _handle_button(args: argparse.Namespace) -> int:
         reason="button",
     )
     print(f"Button events received: {count}")
+    return 0
+
+
+def _play_ring() -> None:
+    """Play a classic two-tone phone ring (480 Hz + 620 Hz, 1 s on) via aplay."""
+    import array
+    import math
+    import shutil
+    import subprocess
+
+    if not shutil.which("aplay"):
+        return
+
+    sample_rate = 22050
+    duration = 1.0
+    n = int(sample_rate * duration)
+    buf = array.array("h")
+    fade = int(sample_rate * 0.02)  # 20 ms fade in/out
+    for i in range(n):
+        t = i / sample_rate
+        envelope = 1.0
+        if i < fade:
+            envelope = i / fade
+        elif i > n - fade:
+            envelope = (n - i) / fade
+        v = (math.sin(2 * math.pi * 480 * t) + math.sin(2 * math.pi * 620 * t)) / 2
+        buf.append(int(v * envelope * 28000))
+
+    subprocess.Popen(
+        ["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(sample_rate), "-c", "1"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).communicate(buf.tobytes())
+
+
+def _handle_listen(args: argparse.Namespace) -> int:
+    import subprocess as _sp
+
+    def on_event():
+        if not args.no_sound:
+            _play_ring()
+        if args.exec_cmd:
+            _sp.Popen(args.exec_cmd, shell=True)
+
+    print("Listening for find-phone trigger from bracelet. Ctrl-C to stop.")
+    count = _run_with_ble_lock(
+        args,
+        lambda device: device.listen_for_find_phone(
+            timeout=args.timeout,
+            max_events=args.count,
+            on_event=on_event,
+        ),
+        reason="listen",
+    )
+    print(f"Find-phone events received: {count}")
     return 0
 
 
