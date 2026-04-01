@@ -379,11 +379,19 @@ class C60A82CDevice:
             self._log(f"diagnose: adapter fault — {exc}")
         return info
 
-    def _preflight_scan(self, bus, dbus_module, scan_timeout: float = 5.0) -> None:
-        """Short discovery pass to verify BT can see at least one device in range."""
-        adapter_obj = bus.get_object(BLUEZ_SVC, self.adapter_path)
-        adapter = dbus_module.Interface(adapter_obj, ADAPTER_IFACE)
-        manager = self._get_manager(bus, dbus_module)
+    def _preflight_scan(self, bus, dbus_module, scan_timeout: float = 5.0) -> bool:
+        """
+        Short discovery pass to check BT can see at least one device.
+        Returns True if any device is visible, False if none found.
+        Never raises — failures are logged and treated as False.
+        """
+        try:
+            adapter_obj = bus.get_object(BLUEZ_SVC, self.adapter_path)
+            adapter = dbus_module.Interface(adapter_obj, ADAPTER_IFACE)
+            manager = self._get_manager(bus, dbus_module)
+        except Exception as exc:
+            self._log(f"preflight: could not reach adapter — {exc}")
+            return False
 
         self._log(f"preflight scan on {self.hci} ({scan_timeout:.0f}s)")
         started = _start_discovery(adapter, dbus_module, self._log)
@@ -398,7 +406,9 @@ class C60A82CDevice:
                 ]
                 if visible:
                     self._log(f"preflight: {len(visible)} device(s) visible")
-                    return
+                    return True
+        except Exception as exc:
+            self._log(f"preflight: scan error — {exc}")
         finally:
             if started:
                 try:
@@ -406,10 +416,8 @@ class C60A82CDevice:
                 except Exception:
                     pass
 
-        raise DeviceError(
-            f"Bluetooth adapter {self.hci} is on but no devices found — "
-            "ensure the target device is powered on and in range"
-        )
+        self._log("preflight: no devices visible")
+        return False
 
     @property
     def adapter_path(self) -> str:
@@ -523,7 +531,17 @@ class C60A82CDevice:
     def _ensure_connected(self, bus, dbus_module) -> None:
         device_path = self._resolve_device_path(bus)
         if not device_path:
-            self._preflight_scan(bus, dbus_module)
+            found_any = self._preflight_scan(bus, dbus_module)
+            if not found_any:
+                # No devices at all — deep recovery then retry preflight
+                self._log("no devices visible, triggering deep recovery")
+                _shell_enable_bluetooth(self.hci, self._log)
+                found_any = self._preflight_scan(bus, dbus_module, scan_timeout=8.0)
+                if not found_any:
+                    self._log(
+                        "still no devices visible after recovery — "
+                        "proceeding to search for target anyway"
+                    )
             device_path = self._discover_device_path(bus, dbus_module)
         if not device_path:
             raise DeviceError(f"Could not find device {self.mac}")
@@ -575,13 +593,21 @@ class C60A82CDevice:
                 time.sleep(0.1)
 
     def _with_vendor_chars(self):
-        bus, dbus_module = self._bus()
-        self._ensure_adapter_powered(bus, dbus_module)
-        self._ensure_connected(bus, dbus_module)
-        ff01_path, ff02_path = self._resolve_paths(bus)
-        ff01 = dbus_module.Interface(bus.get_object(BLUEZ_SVC, ff01_path), GATT_IFACE)
-        ff02 = dbus_module.Interface(bus.get_object(BLUEZ_SVC, ff02_path), GATT_IFACE)
-        return bus, dbus_module, ff01_path, ff01, ff02
+        for attempt in range(3):
+            bus, dbus_module = self._bus()
+            try:
+                self._ensure_adapter_powered(bus, dbus_module)
+                self._ensure_connected(bus, dbus_module)
+                ff01_path, ff02_path = self._resolve_paths(bus)
+                ff01 = dbus_module.Interface(bus.get_object(BLUEZ_SVC, ff01_path), GATT_IFACE)
+                ff02 = dbus_module.Interface(bus.get_object(BLUEZ_SVC, ff02_path), GATT_IFACE)
+                return bus, dbus_module, ff01_path, ff01, ff02
+            except DeviceError as exc:
+                if attempt < 2 and "not connected" in str(exc).lower():
+                    self._log(f"vendor chars attempt {attempt + 1} failed ({exc}), retrying")
+                    time.sleep(2.0)
+                    continue
+                raise
 
     def _run_ff01_command(
         self,
@@ -613,11 +639,15 @@ class C60A82CDevice:
         )
 
         def run():
-            ff01.StartNotify()
-            time.sleep(0.3)
-            self._log(f"sending {' '.join(f'{b:02x}' for b in command)}")
-            self._write_value(ff02, command, dbus_module)
-            GLib.timeout_add(timeout_ms, loop.quit)
+            try:
+                ff01.StartNotify()
+                time.sleep(0.3)
+                self._log(f"sending {' '.join(f'{b:02x}' for b in command)}")
+                self._write_value(ff02, command, dbus_module)
+                GLib.timeout_add(timeout_ms, loop.quit)
+            except Exception as exc:
+                result["error"] = exc
+                loop.quit()
 
         GLib.timeout_add(200, run)
         loop.run()
@@ -627,6 +657,8 @@ class C60A82CDevice:
         except Exception:
             pass
 
+        if "error" in result:
+            raise DeviceError(f"Could not start BLE notifications: {result['error']}") from result["error"]
         if "data" not in result:
             raise DeviceError("No response received (timeout)")
         return result["data"]
@@ -699,13 +731,17 @@ class C60A82CDevice:
         )
 
         def run():
-            ff01.StartNotify()
-            time.sleep(0.3)
-            if do_init:
-                self._write_value(ff02, CMD_GET_DEVICE_STATE, dbus_module)
-            else:
-                send_notification_stage(0)
-            GLib.timeout_add(12000, loop.quit)
+            try:
+                ff01.StartNotify()
+                time.sleep(0.3)
+                if do_init:
+                    self._write_value(ff02, CMD_GET_DEVICE_STATE, dbus_module)
+                else:
+                    send_notification_stage(0)
+                GLib.timeout_add(12000, loop.quit)
+            except Exception as exc:
+                state["error"] = exc
+                loop.quit()
 
         GLib.timeout_add(200, run)
         loop.run()
@@ -715,6 +751,8 @@ class C60A82CDevice:
         except Exception:
             pass
 
+        if "error" in state:
+            raise DeviceError(f"Could not start BLE notifications: {state['error']}") from state["error"]
         if state["notify_stage"] != len(frames) - 1:
             raise DeviceError("Notification sequence did not complete")
 
@@ -820,12 +858,16 @@ class C60A82CDevice:
         )
 
         def run():
-            ff01.StartNotify()
-            time.sleep(0.3)
-            self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_ENTER_CMD)}")
-            self._write_value(ff02, CAMERA_MODE_ENTER_CMD, dbus_module)
-            if timeout is not None:
-                GLib.timeout_add(int(timeout * 1000), loop.quit)
+            try:
+                ff01.StartNotify()
+                time.sleep(0.3)
+                self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_ENTER_CMD)}")
+                self._write_value(ff02, CAMERA_MODE_ENTER_CMD, dbus_module)
+                if timeout is not None:
+                    GLib.timeout_add(int(timeout * 1000), loop.quit)
+            except Exception as exc:
+                events["error"] = exc
+                loop.quit()
 
         GLib.timeout_add(200, run)
         try:
@@ -842,6 +884,8 @@ class C60A82CDevice:
             except Exception:
                 pass
 
+        if "error" in events:
+            raise DeviceError(f"Could not start BLE notifications: {events['error']}") from events["error"]
         return int(events["count"])
 
     def run_dialer(
@@ -969,11 +1013,15 @@ class C60A82CDevice:
         )
 
         def run():
-            ff01.StartNotify()
-            time.sleep(0.3)
-            self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_ENTER_CMD)}")
-            self._write_value(ff02, CAMERA_MODE_ENTER_CMD, dbus_module)
-            GLib.timeout_add(100, heartbeat)
+            try:
+                ff01.StartNotify()
+                time.sleep(0.3)
+                self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_ENTER_CMD)}")
+                self._write_value(ff02, CAMERA_MODE_ENTER_CMD, dbus_module)
+                GLib.timeout_add(100, heartbeat)
+            except Exception as exc:
+                result["error"] = exc
+                loop.quit()
 
         GLib.timeout_add(200, run)
         try:
@@ -990,6 +1038,8 @@ class C60A82CDevice:
             except Exception:
                 pass
 
+        if "error" in result:
+            raise DeviceError(f"Could not start BLE notifications: {result['error']}") from result["error"]
         for message in feedback_messages:
             try:
                 self.send_notification(
@@ -1052,12 +1102,16 @@ class C60A82CDevice:
         )
 
         def run():
-            ff01.StartNotify()
-            time.sleep(0.3)
-            self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_ENTER_CMD)}")
-            self._write_value(ff02, CAMERA_MODE_ENTER_CMD, dbus_module)
-            GLib.timeout_add(100, heartbeat)
-            GLib.timeout_add(int(timeout * 1000), lambda: finish() or False)
+            try:
+                ff01.StartNotify()
+                time.sleep(0.3)
+                self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_ENTER_CMD)}")
+                self._write_value(ff02, CAMERA_MODE_ENTER_CMD, dbus_module)
+                GLib.timeout_add(100, heartbeat)
+                GLib.timeout_add(int(timeout * 1000), lambda: finish() or False)
+            except Exception as exc:
+                report["error"] = exc
+                loop.quit()
 
         GLib.timeout_add(200, run)
         try:
@@ -1074,4 +1128,6 @@ class C60A82CDevice:
             except Exception:
                 pass
 
+        if "error" in report:
+            raise DeviceError(f"Could not start BLE notifications: {report['error']}") from report["error"]
         return report["text"] or format_calibration_report(press_times)
