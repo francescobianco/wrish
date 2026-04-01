@@ -5,6 +5,8 @@ from pathlib import Path
 import shlex
 import subprocess
 
+from .config import load_config
+
 
 def _prompt(text: str, default: str | None = None) -> str:
     suffix = f" [{default}]" if default is not None else ""
@@ -67,18 +69,22 @@ def run_systemd_wizard(default_binary: str, *, force_install: bool = False) -> P
     print("This creates a user-level systemd service in ~/.config/systemd/user.")
     print("")
 
+    cfg = load_config()
+
     service_name = _prompt("Service name", "wrish")
     description = _prompt("Description", "wrish bracelet service")
+    mac = _prompt("Device MAC address", cfg.mac)
+    hci = _prompt("Bluetooth adapter", cfg.hci)
     use_relay = _prompt_bool("Enable relay mode", True)
     use_sentinel = _prompt_bool("Enable sentinel monitoring", True)
     debug = _prompt_bool("Enable --debug logs", False)
 
-    command = [default_binary]
+    command = [default_binary, "--mac", mac, "--hci", hci]
     if debug:
         command.append("--debug")
 
     if use_relay:
-        relay_url = _prompt("Relay URL (.relay)", "https://www.hookpool.com/braccialetto/7bgs3p.relay")
+        relay_url = _prompt("Relay URL (.relay)", "https://www.hookpool.com/xxxx/xxxx.relay")
         bind = _prompt("Relay bind address", "127.0.0.1")
         port = _prompt("Relay bind port", "8787")
         command.extend(["relay", relay_url, "--bind", bind, "--port", port])

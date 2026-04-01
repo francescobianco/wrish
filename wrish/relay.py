@@ -410,7 +410,7 @@ def _run_sentinel_loop(
                 if debug:
                     print("[sentinel] connected, sending notification...")
                 device.send_notification(app_name=app, title=title, body=body, do_init=True)
-                print("Sentinel: bracelet connected")
+                print("Connected!")
                 announced = True
         except Exception as exc:
             announced = False

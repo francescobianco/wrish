@@ -307,7 +307,7 @@ def _handle_sentinel(args: argparse.Namespace) -> int:
                     body=args.body,
                     do_init=True,
                 )
-                print("Sentinel: bracelet connected")
+                print("Connected!")
                 announced = True
         except DeviceError as exc:
             announced = False

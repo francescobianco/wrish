@@ -104,7 +104,7 @@ wrish vibrate --seconds 300 --interval 1
 Puoi anche abbinarlo al relay nello stesso processo:
 
 ```shell
-wrish relay https://www.hookpool.com/braccialetto/7bgs3p.relay --sentinel
+wrish relay https://www.hookpool.com/xxxx/xxxx.relay --sentinel
 ```
 
 Questo e` il caso tipico da mettere sotto `systemd --user`, cosi` il processo resta in background e:
