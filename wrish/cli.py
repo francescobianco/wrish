@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Also fetch historical HR/BP/SpO2 for this date (minute-by-minute)",
     )
+    health.add_argument(
+        "--json",
+        action="store_true",
+        help="Output raw data as JSON",
+    )
     health.set_defaults(handler=_handle_health)
 
     find = subparsers.add_parser("find", help="Ring the bracelet")
@@ -168,6 +173,7 @@ def _handle_battery(args: argparse.Namespace) -> int:
 
 def _handle_health(args: argparse.Namespace) -> int:
     import datetime
+    import json
 
     date = None
     if args.date:
@@ -187,17 +193,23 @@ def _handle_health(args: argparse.Namespace) -> int:
         print("No data received", file=sys.stderr)
         return 1
 
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+
+    print(f"Timestamp: {data.get('timestamp', '?')}")
+
     if "snapshot_steps" in data:
         s = data["snapshot_steps"]
-        print(f"Steps:    {s['steps']}")
-        print(f"Calories: {s['calories_kcal']} kcal")
-        print(f"Distance: {s['distance_m']} m")
+        print(f"Steps:     {s['steps']}")
+        print(f"Calories:  {s['calories_kcal']} kcal")
+        print(f"Distance:  {s['distance_m']} m")
 
     if "snapshot_hart" in data:
         h = data["snapshot_hart"]
-        print(f"HR:       {h['hr_bpm']} bpm")
-        print(f"BP:       {h['bp_systolic_mmhg']}/{h['bp_diastolic_mmhg']} mmHg")
-        print(f"SpO2:     {h['spo2_pct']}%")
+        print(f"HR:        {h['hr_bpm']} bpm")
+        print(f"BP:        {h['bp_systolic_mmhg']}/{h['bp_diastolic_mmhg']} mmHg")
+        print(f"SpO2:      {h['spo2_pct']}%")
 
     if "history_hart" in data:
         records = data["history_hart"]

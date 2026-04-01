@@ -689,12 +689,15 @@ class C60A82CDevice:
     def read_health(self, date: dt.date | None = None) -> dict[str, object]:
         """Read current health snapshot and optionally historical data for one day.
 
-        Returns a dict with up to three keys:
+        Returns a dict with up to four keys:
+          - "timestamp":      ISO-8601 string of when the snapshot was taken
           - "snapshot_steps": {"steps", "calories_kcal", "distance_m"}
           - "snapshot_hart":  {"hr_bpm", "bp_diastolic_mmhg", "bp_systolic_mmhg", "spo2_pct"}
           - "history_hart":   list of per-minute records for *date* (only if date is given)
         """
-        result: dict[str, object] = {}
+        result: dict[str, object] = {
+            "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
+        }
 
         # Current steps / calories / distance
         step_data = self._run_ff01_command(
