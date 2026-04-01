@@ -33,6 +33,38 @@ def _build_execstart(command: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
 
+def _service_label(service_name: str) -> str:
+    return service_name[:-8] if service_name.endswith(".service") else service_name
+
+
+def _format_systemctl_success(verb: str, service_name: str | None = None) -> str:
+    label = _service_label(service_name) if service_name else "wrish"
+    messages = {
+        "start": f"systemd: {label} started",
+        "stop": f"systemd: {label} stopped",
+        "restart": f"systemd: {label} restarted",
+        "enable": f"systemd: {label} enabled",
+        "disable": f"systemd: {label} disabled",
+        "daemon-reload": "systemd: daemon reloaded",
+        "status": f"systemd: showing status for {label}",
+    }
+    return messages.get(verb, f"systemd: {' '.join(part for part in (label, verb) if part)}")
+
+
+def _run_systemctl(command: list[str]) -> int:
+    verb = command[2] if len(command) >= 3 else "systemctl"
+    service_name = command[-1] if command and command[-1].endswith(".service") else None
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    if completed.returncode == 0:
+        print(_format_systemctl_success(verb, service_name))
+    else:
+        print(f"systemd: {verb} failed for {_service_label(service_name or 'wrish.service')} (exit {completed.returncode})")
+        error_output = (completed.stderr or completed.stdout).strip()
+        if error_output:
+            print(error_output)
+    return completed.returncode
+
+
 def render_service(config: SystemdConfig) -> str:
     execstart = _build_execstart(config.command)
     return "\n".join(
@@ -110,7 +142,7 @@ def run_systemd_wizard(default_binary: str, *, force_install: bool = False) -> P
     print(f"Written: {service_path}")
 
     _run_systemctl(["systemctl", "--user", "daemon-reload"])
-    _run_systemctl(["systemctl", "--user", "enable", "--now", f"{service_name}.service"])
+    _run_systemctl(["systemctl", "--user", "enable", f"{service_name}.service"])
     _run_systemctl(["systemctl", "--user", "restart", f"{service_name}.service"])
     _run_systemctl(["systemctl", "--user", "status", f"{service_name}.service"])
 
@@ -118,14 +150,6 @@ def run_systemd_wizard(default_binary: str, *, force_install: bool = False) -> P
         subprocess.run(["journalctl", "--user", "-u", f"{service_name}.service", "-f"], check=False)
 
     return service_path
-
-
-def _run_systemctl(command: list[str]) -> None:
-    print("")
-    print("$", _build_execstart(command))
-    completed = subprocess.run(command, check=False, text=True)
-    if completed.returncode != 0:
-        print(f"Command failed with exit code {completed.returncode}")
 
 
 def _show_existing_service_info(service_path: Path) -> None:
@@ -192,18 +216,13 @@ def systemd_action(action: str, service_name: str | None = None) -> int:
 
     exit_code = 0
     for command in commands[action]:
-        print("")
-        print("$", _build_execstart(command))
-        completed = subprocess.run(command, check=False, text=True)
-        if completed.returncode != 0:
-            print(f"Command failed with exit code {completed.returncode}")
-            exit_code = completed.returncode
+        exit_code = _run_systemctl(command) or exit_code
 
     if action == "reset":
         service_path = _default_service_path()
         if service_path.exists():
             service_path.unlink()
-            print(f"Removed: {service_path}")
+            print(f"systemd: removed {service_path}")
 
     return exit_code
 
