@@ -4,7 +4,10 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # ---------------------------------------------------------------------------
 # Stub out dbus / gi so the module loads without the real system libraries
@@ -31,6 +34,8 @@ from wrish.devices.c60_a82c import (  # noqa: E402
     DEVICE_IFACE,
     DeviceError,
     C60A82CDevice,
+    _recover_after_not_connected,
+    _run_with_notify_retries,
 )
 
 MODULE = "wrish.devices.c60_a82c"
@@ -134,9 +139,9 @@ class TestPreflightScan(unittest.TestCase):
             mock_time.sleep = MagicMock()
             # make monotonic advance past scan_timeout immediately on first call
             mock_time.monotonic.side_effect = [0.0, 0.0, scan_timeout + 1]
-            device._preflight_scan(bus, dbus_module, scan_timeout=scan_timeout)
+            return device._preflight_scan(bus, dbus_module, scan_timeout=scan_timeout)
 
-    def test_finds_device_returns_ok(self):
+    def test_finds_device_returns_true(self):
         dev = _make_device()
         objects = {
             "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF": {
@@ -144,10 +149,9 @@ class TestPreflightScan(unittest.TestCase):
             }
         }
         bus, dbus_module, _, manager = _make_preflight_mocks(objects)
-        # Should not raise
-        self._run(dev, bus, dbus_module, manager)
+        self.assertTrue(self._run(dev, bus, dbus_module, manager))
 
-    def test_no_devices_raises(self):
+    def test_no_devices_returns_false(self):
         dev = _make_device()
         bus, dbus_module, _, manager = _make_preflight_mocks({})
 
@@ -158,10 +162,7 @@ class TestPreflightScan(unittest.TestCase):
             mock_time.sleep = MagicMock()
             # monotonic advances past timeout quickly
             mock_time.monotonic.side_effect = [0.0, 0.0, 1.0, 2.0, 10.0]
-            with self.assertRaises(DeviceError) as ctx:
-                dev._preflight_scan(bus, dbus_module, scan_timeout=0.05)
-
-        self.assertIn("no devices found", str(ctx.exception))
+            self.assertFalse(dev._preflight_scan(bus, dbus_module, scan_timeout=0.05))
 
     def test_non_device_objects_ignored(self):
         dev = _make_device()
@@ -176,8 +177,7 @@ class TestPreflightScan(unittest.TestCase):
         ):
             mock_time.sleep = MagicMock()
             mock_time.monotonic.side_effect = [0.0, 0.0, 1.0, 2.0, 10.0]
-            with self.assertRaises(DeviceError):
-                dev._preflight_scan(bus, dbus_module, scan_timeout=0.05)
+            self.assertFalse(dev._preflight_scan(bus, dbus_module, scan_timeout=0.05))
 
     def test_stop_discovery_called_even_on_failure(self):
         dev = _make_device()
@@ -189,10 +189,7 @@ class TestPreflightScan(unittest.TestCase):
         ):
             mock_time.sleep = MagicMock()
             mock_time.monotonic.side_effect = [0.0, 0.0, 1.0, 2.0, 10.0]
-            try:
-                dev._preflight_scan(bus, dbus_module, scan_timeout=0.05)
-            except DeviceError:
-                pass
+            dev._preflight_scan(bus, dbus_module, scan_timeout=0.05)
 
         adapter_iface.StopDiscovery.assert_called()
 
@@ -205,8 +202,7 @@ class TestPreflightScan(unittest.TestCase):
             }
         }
         bus, dbus_module, _, manager = _make_preflight_mocks(objects)
-        # Should not raise even though it's not the target MAC
-        self._run(dev, bus, dbus_module, manager)
+        self.assertTrue(self._run(dev, bus, dbus_module, manager))
 
 
 # ---------------------------------------------------------------------------
@@ -227,11 +223,14 @@ class TestEnsureConnectedPreflight(unittest.TestCase):
         dev_props.Get.return_value = True  # "Connected" → skip Connect() call
         dbus_module.Interface.return_value = dev_props
 
+        resolved = [None, "/org/bluez/hci0/dev_AA_BB_CC"]
+
         def _fake_resolve(self, bus):
-            return None  # not found in cache
+            return resolved.pop(0)
 
         def _fake_preflight(self, bus, dbus_module, scan_timeout=5.0):
             call_order.append("preflight")
+            return True
 
         def _fake_discover(self, bus, dbus_module, timeout=12.0):
             call_order.append("discover")
@@ -299,6 +298,45 @@ class TestEnsureConnectedPreflight(unittest.TestCase):
                 dev._ensure_connected(bus, dbus_module)
 
         self.assertEqual(discover_called, [], "_discover_device_path must not be called after preflight failure")
+
+
+class TestNotifyRecovery(unittest.TestCase):
+
+    def test_run_with_notify_retries_recovers_after_not_connected(self):
+        dev = _make_device()
+        attempts = []
+        recover_calls = []
+
+        def operation():
+            attempts.append("run")
+            if len(attempts) == 1:
+                cause = RuntimeError("org.bluez.Error.Failed: Not connected")
+                raise DeviceError(f"Could not start BLE notifications: {cause}") from cause
+            return "ok"
+
+        def fake_recover(self, exc):
+            recover_calls.append(str(exc))
+
+        with patch(f"{MODULE}._recover_after_not_connected", fake_recover):
+            result = _run_with_notify_retries(dev, operation, context="test")
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(recover_calls, ["org.bluez.Error.Failed: Not connected"])
+
+    def test_run_with_notify_retries_does_not_retry_other_errors(self):
+        dev = _make_device()
+        attempts = []
+
+        def operation():
+            attempts.append("run")
+            cause = RuntimeError("org.bluez.Error.NotPermitted")
+            raise DeviceError(f"Could not start BLE notifications: {cause}") from cause
+
+        with self.assertRaises(DeviceError):
+            _run_with_notify_retries(dev, operation, context="test")
+
+        self.assertEqual(len(attempts), 1)
 
 
 if __name__ == "__main__":

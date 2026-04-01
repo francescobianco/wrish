@@ -70,6 +70,10 @@ def _is_in_progress_error(exc: Exception) -> bool:
     return "org.bluez.Error.InProgress" in str(exc)
 
 
+def _is_not_connected_error(exc: Exception) -> bool:
+    return "org.bluez.Error.Failed: Not connected" in str(exc)
+
+
 def _load_bluez_modules():
     try:
         import dbus
@@ -168,6 +172,43 @@ def _shell_enable_bluetooth(hci: str, log_fn) -> None:
     if not _run(["sudo", "-n", "systemctl", "restart", "bluetooth.service"], 15):
         _run(["systemctl", "restart", "bluetooth.service"], 15)
     time.sleep(3.0)
+
+
+def _recover_after_not_connected(device: "C60A82CDevice", exc: Exception) -> None:
+    device._log(f"BLE session lost ({exc}); running preflight recovery")
+    bus, dbus_module = device._bus()
+    device._ensure_adapter_powered(bus, dbus_module)
+    found_any = device._preflight_scan(bus, dbus_module, scan_timeout=3.0)
+    if not found_any:
+        device._log("recovery preflight saw no devices, triggering deep recovery")
+        _shell_enable_bluetooth(device.hci, device._log)
+        device._ensure_adapter_powered(bus, dbus_module)
+        device._preflight_scan(bus, dbus_module, scan_timeout=8.0)
+    device._ensure_connected(bus, dbus_module)
+
+
+def _run_with_notify_retries(
+    device: "C60A82CDevice",
+    operation: Callable[[], object],
+    *,
+    context: str,
+):
+    last_exc: DeviceError | None = None
+    for attempt in range(3):
+        try:
+            return operation()
+        except DeviceError as exc:
+            last_exc = exc
+            cause = exc.__cause__
+            if attempt >= 2 or cause is None or not _is_not_connected_error(cause):
+                raise
+            device._log(
+                f"{context}: notify session attempt {attempt + 1} failed with disconnected BLE link; retrying"
+            )
+            _recover_after_not_connected(device, cause)
+            time.sleep(1.0)
+    assert last_exc is not None
+    raise last_exc
 
 
 def checksum(frame: list[int]) -> int:
@@ -616,145 +657,151 @@ class C60A82CDevice:
         matcher: Callable[[list[int]], bool],
         timeout_ms: int = 8000,
     ) -> list[int]:
-        bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
-        _dbus, GLib = _load_bluez_modules()
-        result: dict[str, list[int]] = {}
-        loop = GLib.MainLoop()
+        def operation() -> list[int]:
+            bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
+            _dbus, GLib = _load_bluez_modules()
+            result: dict[str, list[int]] = {}
+            loop = GLib.MainLoop()
 
-        def on_changed(_iface, changed, _invalidated, path=None):
-            if "Value" not in changed:
-                return
-            data = [int(byte) for byte in changed["Value"]]
-            self._log(f"FF01: {' '.join(f'{b:02x}' for b in data)}")
-            if matcher(data):
-                result["data"] = data
-                loop.quit()
+            def on_changed(_iface, changed, _invalidated, path=None):
+                if "Value" not in changed:
+                    return
+                data = [int(byte) for byte in changed["Value"]]
+                self._log(f"FF01: {' '.join(f'{b:02x}' for b in data)}")
+                if matcher(data):
+                    result["data"] = data
+                    loop.quit()
 
-        bus.add_signal_receiver(
-            on_changed,
-            signal_name="PropertiesChanged",
-            dbus_interface=PROPS_IFACE,
-            path=ff01_path,
-            path_keyword="path",
-        )
+            bus.add_signal_receiver(
+                on_changed,
+                signal_name="PropertiesChanged",
+                dbus_interface=PROPS_IFACE,
+                path=ff01_path,
+                path_keyword="path",
+            )
 
-        def run():
+            def run():
+                try:
+                    ff01.StartNotify()
+                    time.sleep(0.3)
+                    self._log(f"sending {' '.join(f'{b:02x}' for b in command)}")
+                    self._write_value(ff02, command, dbus_module)
+                    GLib.timeout_add(timeout_ms, loop.quit)
+                except Exception as exc:
+                    result["error"] = exc
+                    loop.quit()
+
+            GLib.timeout_add(200, run)
+            loop.run()
+
             try:
-                ff01.StartNotify()
-                time.sleep(0.3)
-                self._log(f"sending {' '.join(f'{b:02x}' for b in command)}")
-                self._write_value(ff02, command, dbus_module)
-                GLib.timeout_add(timeout_ms, loop.quit)
-            except Exception as exc:
-                result["error"] = exc
-                loop.quit()
+                ff01.StopNotify()
+            except Exception:
+                pass
 
-        GLib.timeout_add(200, run)
-        loop.run()
+            if "error" in result:
+                raise DeviceError(f"Could not start BLE notifications: {result['error']}") from result["error"]
+            if "data" not in result:
+                raise DeviceError("No response received (timeout)")
+            return result["data"]
 
-        try:
-            ff01.StopNotify()
-        except Exception:
-            pass
-
-        if "error" in result:
-            raise DeviceError(f"Could not start BLE notifications: {result['error']}") from result["error"]
-        if "data" not in result:
-            raise DeviceError("No response received (timeout)")
-        return result["data"]
+        return _run_with_notify_retries(self, operation, context="ff01-command")
 
     def _run_notification_sequence(self, frames: list[list[int]], *, do_init: bool) -> None:
-        bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
-        _dbus, GLib = _load_bluez_modules()
-        state = {
-            "phase": "get_state" if do_init else "notify",
-            "notify_stage": 0,
-            "device_state_payload": [],
-        }
-        loop = GLib.MainLoop()
+        def operation() -> None:
+            bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
+            _dbus, GLib = _load_bluez_modules()
+            state = {
+                "phase": "get_state" if do_init else "notify",
+                "notify_stage": 0,
+                "device_state_payload": [],
+            }
+            loop = GLib.MainLoop()
 
-        def send_notification_stage(stage: int) -> None:
-            frame = frames[stage]
-            self._log(f"sending stage {stage}: {' '.join(f'{b:02x}' for b in frame)}")
-            self._write_value(ff02, frame, dbus_module)
+            def send_notification_stage(stage: int) -> None:
+                frame = frames[stage]
+                self._log(f"sending stage {stage}: {' '.join(f'{b:02x}' for b in frame)}")
+                self._write_value(ff02, frame, dbus_module)
 
-        def on_changed(_iface, changed, _invalidated, path=None):
-            if "Value" not in changed:
-                return
-            data = [int(byte) for byte in changed["Value"]]
-            if not data:
-                return
-
-            first = data[0]
-            length = (data[2] << 8 | data[1]) if len(data) >= 3 else 0
-            self._log(f"FF01: {' '.join(f'{b:02x}' for b in data)}")
-            phase = state["phase"]
-
-            if phase == "get_state" and first == 0x82 and length > 1:
-                payload = data[3:-1]
-                state["device_state_payload"] = payload
-                state["phase"] = "set_state"
-                GLib.timeout_add(200, lambda: self._write_value(ff02, frame_set_device_state(payload), dbus_module) or False)
-                return
-
-            if phase == "set_state" and first == 0x82 and length == 1:
-                state["phase"] = "set_time"
-                GLib.timeout_add(200, lambda: self._write_value(ff02, frame_set_time(), dbus_module) or False)
-                return
-
-            if phase == "set_time" and first == 0x84 and length == 1:
-                state["phase"] = "set_notice"
-                GLib.timeout_add(200, lambda: self._write_value(ff02, CMD_SET_NOTICE_ALL, dbus_module) or False)
-                return
-
-            if phase == "set_notice" and first == 0x89 and length == 1:
-                state["phase"] = "notify"
-                GLib.timeout_add(200, lambda: send_notification_stage(0) or False)
-                return
-
-            if phase == "notify" and first == 0x8A and len(data) >= 4:
-                stage = data[3]
-                if stage != state["notify_stage"]:
+            def on_changed(_iface, changed, _invalidated, path=None):
+                if "Value" not in changed:
                     return
-                if stage >= len(frames) - 1:
+                data = [int(byte) for byte in changed["Value"]]
+                if not data:
+                    return
+
+                first = data[0]
+                length = (data[2] << 8 | data[1]) if len(data) >= 3 else 0
+                self._log(f"FF01: {' '.join(f'{b:02x}' for b in data)}")
+                phase = state["phase"]
+
+                if phase == "get_state" and first == 0x82 and length > 1:
+                    payload = data[3:-1]
+                    state["device_state_payload"] = payload
+                    state["phase"] = "set_state"
+                    GLib.timeout_add(200, lambda: self._write_value(ff02, frame_set_device_state(payload), dbus_module) or False)
+                    return
+
+                if phase == "set_state" and first == 0x82 and length == 1:
+                    state["phase"] = "set_time"
+                    GLib.timeout_add(200, lambda: self._write_value(ff02, frame_set_time(), dbus_module) or False)
+                    return
+
+                if phase == "set_time" and first == 0x84 and length == 1:
+                    state["phase"] = "set_notice"
+                    GLib.timeout_add(200, lambda: self._write_value(ff02, CMD_SET_NOTICE_ALL, dbus_module) or False)
+                    return
+
+                if phase == "set_notice" and first == 0x89 and length == 1:
+                    state["phase"] = "notify"
+                    GLib.timeout_add(200, lambda: send_notification_stage(0) or False)
+                    return
+
+                if phase == "notify" and first == 0x8A and len(data) >= 4:
+                    stage = data[3]
+                    if stage != state["notify_stage"]:
+                        return
+                    if stage >= len(frames) - 1:
+                        loop.quit()
+                        return
+                    state["notify_stage"] += 1
+                    GLib.timeout_add(200, lambda: send_notification_stage(state["notify_stage"]) or False)
+
+            bus.add_signal_receiver(
+                on_changed,
+                signal_name="PropertiesChanged",
+                dbus_interface=PROPS_IFACE,
+                path=ff01_path,
+                path_keyword="path",
+            )
+
+            def run():
+                try:
+                    ff01.StartNotify()
+                    time.sleep(0.3)
+                    if do_init:
+                        self._write_value(ff02, CMD_GET_DEVICE_STATE, dbus_module)
+                    else:
+                        send_notification_stage(0)
+                    GLib.timeout_add(12000, loop.quit)
+                except Exception as exc:
+                    state["error"] = exc
                     loop.quit()
-                    return
-                state["notify_stage"] += 1
-                GLib.timeout_add(200, lambda: send_notification_stage(state["notify_stage"]) or False)
 
-        bus.add_signal_receiver(
-            on_changed,
-            signal_name="PropertiesChanged",
-            dbus_interface=PROPS_IFACE,
-            path=ff01_path,
-            path_keyword="path",
-        )
+            GLib.timeout_add(200, run)
+            loop.run()
 
-        def run():
             try:
-                ff01.StartNotify()
-                time.sleep(0.3)
-                if do_init:
-                    self._write_value(ff02, CMD_GET_DEVICE_STATE, dbus_module)
-                else:
-                    send_notification_stage(0)
-                GLib.timeout_add(12000, loop.quit)
-            except Exception as exc:
-                state["error"] = exc
-                loop.quit()
+                ff01.StopNotify()
+            except Exception:
+                pass
 
-        GLib.timeout_add(200, run)
-        loop.run()
+            if "error" in state:
+                raise DeviceError(f"Could not start BLE notifications: {state['error']}") from state["error"]
+            if state["notify_stage"] != len(frames) - 1:
+                raise DeviceError("Notification sequence did not complete")
 
-        try:
-            ff01.StopNotify()
-        except Exception:
-            pass
-
-        if "error" in state:
-            raise DeviceError(f"Could not start BLE notifications: {state['error']}") from state["error"]
-        if state["notify_stage"] != len(frames) - 1:
-            raise DeviceError("Notification sequence did not complete")
+        _run_with_notify_retries(self, operation, context="notify-sequence")
 
     def read_info(self) -> dict[str, str]:
         bus, dbus_module = self._bus()

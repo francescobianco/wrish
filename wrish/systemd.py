@@ -162,6 +162,52 @@ def _read_systemctl_output(command: list[str]) -> str:
     return output
 
 
+def _default_service_path() -> Path:
+    return Path.home() / ".config/systemd/user/wrish.service"
+
+
+def resolve_service_name(default: str = "wrish.service") -> str:
+    service_path = _default_service_path()
+    if service_path.exists():
+        return service_path.name
+    return default
+
+
+def systemd_action(action: str, service_name: str | None = None) -> int:
+    resolved_service = service_name or resolve_service_name()
+    if not resolved_service.endswith(".service"):
+        resolved_service = f"{resolved_service}.service"
+
+    commands: dict[str, list[list[str]]] = {
+        "start": [["systemctl", "--user", "start", resolved_service]],
+        "stop": [["systemctl", "--user", "stop", resolved_service]],
+        "reset": [
+            ["systemctl", "--user", "stop", resolved_service],
+            ["systemctl", "--user", "disable", resolved_service],
+            ["systemctl", "--user", "daemon-reload"],
+        ],
+    }
+    if action not in commands:
+        raise ValueError(f"Unsupported systemd action: {action}")
+
+    exit_code = 0
+    for command in commands[action]:
+        print("")
+        print("$", _build_execstart(command))
+        completed = subprocess.run(command, check=False, text=True)
+        if completed.returncode != 0:
+            print(f"Command failed with exit code {completed.returncode}")
+            exit_code = completed.returncode
+
+    if action == "reset":
+        service_path = _default_service_path()
+        if service_path.exists():
+            service_path.unlink()
+            print(f"Removed: {service_path}")
+
+    return exit_code
+
+
 def follow_logs(service_name: str = "wrish.service") -> int:
     return subprocess.run(
         ["journalctl", "--user", "-u", service_name, "-f"],
