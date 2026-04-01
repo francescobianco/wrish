@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+APP_TYPES = {
+    "wechat": 2,
+    "qq": 3,
+    "facebook": 4,
+    "skype": 5,
+    "twitter": 6,
+    "whatsapp": 7,
+    "line": 8,
+    "linkedin": 9,
+    "instagram": 10,
+    "messenger": 12,
+    "vk": 13,
+    "viber": 14,
+    "telegram": 16,
+    "kakaotalk": 18,
+    "douyin": 32,
+    "kuaishou": 33,
+    "douyin_lite": 34,
+    "maimai": 52,
+    "pinduoduo": 53,
+    "work_wechat": 54,
+    "tantan": 56,
+    "taobao": 57,
+}
+
+BLUEZ_SVC = "org.bluez"
+PROPS_IFACE = "org.freedesktop.DBus.Properties"
+DEVICE_IFACE = "org.bluez.Device1"
+GATT_IFACE = "org.bluez.GattCharacteristic1"
+OM_IFACE = "org.freedesktop.DBus.ObjectManager"
+ADAPTER_IFACE = "org.bluez.Adapter1"
+
+FF01_UUID_PREFIX = "0000ff01"
+FF02_UUID_PREFIX = "0000ff02"
+DEVICE_NAME_UUID_PREFIX = "00002a00"
+
+CMD_GET_DEVICE_STATE  = [0x02, 0x00, 0x00, 0x06]
+CMD_SET_NOTICE_ALL    = [0x09, 0x04, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x60]
+CMD_GET_CURRENT_POWER = [0x27, 0x00, 0x00, 0x74]
+CMD_GET_CURRENT_STEP  = [0x20, 0x01, 0x00, 0x00, 0x70]   # steps / calories / distance snapshot
+CMD_GET_HART_SNAPSHOT = [0x21, 0x01, 0x00, 0x00, 0xC6]  # HR / BP / SpO2 snapshot
+END_MESSAGE           = [0x0A, 0x01, 0x00, 0x03, 0x0E]
+
+APP_TYPE_CALL = 0x00
+APP_TYPE_SMS  = 0x01
+
+FIND_DEVICE_CMD = [
+    0x10, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+]
+CAMERA_MODE_ENTER_CMD      = [0x10, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0]
+CAMERA_MODE_EXIT_CMD       = [0x10, 0x08, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6C]
+CAMERA_BUTTON_EVENT        = [0x90, 0x08, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16]
+CAMERA_BUTTON_DEDUP_SECONDS = 0.05

@@ -46,6 +46,15 @@ def build_parser() -> argparse.ArgumentParser:
     battery = subparsers.add_parser("battery", help="Read battery level")
     battery.set_defaults(handler=_handle_battery)
 
+    health = subparsers.add_parser("health", help="Read health snapshot (steps, HR, BP, SpO2)")
+    health.add_argument(
+        "--date",
+        metavar="YYYY-MM-DD",
+        default=None,
+        help="Also fetch historical HR/BP/SpO2 for this date (minute-by-minute)",
+    )
+    health.set_defaults(handler=_handle_health)
+
     find = subparsers.add_parser("find", help="Ring the bracelet")
     find.set_defaults(handler=_handle_find)
 
@@ -154,6 +163,51 @@ def _handle_info(args: argparse.Namespace) -> int:
 def _handle_battery(args: argparse.Namespace) -> int:
     percent = _run_with_ble_lock(args, lambda device: device.read_battery(), reason="battery")
     print(f"Battery: {percent}%")
+    return 0
+
+
+def _handle_health(args: argparse.Namespace) -> int:
+    import datetime
+
+    date = None
+    if args.date:
+        try:
+            date = datetime.date.fromisoformat(args.date)
+        except ValueError:
+            print(f"Error: invalid date '{args.date}', expected YYYY-MM-DD", file=sys.stderr)
+            return 1
+
+    data = _run_with_ble_lock(
+        args,
+        lambda device: device.read_health(date),
+        reason="health",
+    )
+
+    if not data:
+        print("No data received", file=sys.stderr)
+        return 1
+
+    if "snapshot_steps" in data:
+        s = data["snapshot_steps"]
+        print(f"Steps:    {s['steps']}")
+        print(f"Calories: {s['calories_kcal']} kcal")
+        print(f"Distance: {s['distance_m']} m")
+
+    if "snapshot_hart" in data:
+        h = data["snapshot_hart"]
+        print(f"HR:       {h['hr_bpm']} bpm")
+        print(f"BP:       {h['bp_systolic_mmhg']}/{h['bp_diastolic_mmhg']} mmHg")
+        print(f"SpO2:     {h['spo2_pct']}%")
+
+    if "history_hart" in data:
+        records = data["history_hart"]
+        print(f"\nHistorical HR/BP/SpO2 — {args.date}  ({len(records)} measurements with data)")
+        print(f"{'Time':>5}  {'HR':>6}  {'BP':>9}  {'SpO2':>4}")
+        print(f"{'-----':>5}  {'------':>6}  {'---------':>9}  {'----':>4}")
+        for r in records:
+            bp = f"{r['bp_systolic_mmhg']}/{r['bp_diastolic_mmhg']}"
+            print(f"{r['time']:>5}  {r['hr_bpm']:>4} bpm  {bp:>9}  {r['spo2_pct']:>3}%")
+
     return 0
 
 

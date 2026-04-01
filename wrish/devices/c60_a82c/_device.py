@@ -2,220 +2,57 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import datetime as dt
-import subprocess
 import sys
 import time
 from typing import Callable
 
-
-APP_TYPES = {
-    "wechat": 2,
-    "qq": 3,
-    "facebook": 4,
-    "skype": 5,
-    "twitter": 6,
-    "whatsapp": 7,
-    "line": 8,
-    "linkedin": 9,
-    "instagram": 10,
-    "messenger": 12,
-    "vk": 13,
-    "viber": 14,
-    "telegram": 16,
-    "kakaotalk": 18,
-    "douyin": 32,
-    "kuaishou": 33,
-    "douyin_lite": 34,
-    "maimai": 52,
-    "pinduoduo": 53,
-    "work_wechat": 54,
-    "tantan": 56,
-    "taobao": 57,
-}
-
-BLUEZ_SVC = "org.bluez"
-PROPS_IFACE = "org.freedesktop.DBus.Properties"
-DEVICE_IFACE = "org.bluez.Device1"
-GATT_IFACE = "org.bluez.GattCharacteristic1"
-OM_IFACE = "org.freedesktop.DBus.ObjectManager"
-ADAPTER_IFACE = "org.bluez.Adapter1"
-
-FF01_UUID_PREFIX = "0000ff01"
-FF02_UUID_PREFIX = "0000ff02"
-DEVICE_NAME_UUID_PREFIX = "00002a00"
-
-CMD_GET_DEVICE_STATE = [0x02, 0x00, 0x00, 0x06]
-CMD_SET_NOTICE_ALL = [0x09, 0x04, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x60]
-CMD_GET_CURRENT_POWER = [0x27, 0x00, 0x00, 0x74]
-END_MESSAGE = [0x0A, 0x01, 0x00, 0x03, 0x0E]
-
-APP_TYPE_CALL = 0x00
-APP_TYPE_SMS = 0x01
-
-FIND_DEVICE_CMD = [
-    0x10, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-    0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-]
-CAMERA_MODE_ENTER_CMD = [0x10, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0]
-CAMERA_MODE_EXIT_CMD = [0x10, 0x08, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6C]
-CAMERA_BUTTON_EVENT = [0x90, 0x08, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16]
-CAMERA_BUTTON_DEDUP_SECONDS = 0.05
-
-
-class DeviceError(RuntimeError):
-    pass
-
-
-def _is_in_progress_error(exc: Exception) -> bool:
-    return "org.bluez.Error.InProgress" in str(exc)
-
-
-def _is_not_connected_error(exc: Exception) -> bool:
-    return "org.bluez.Error.Failed: Not connected" in str(exc)
-
-
-def _load_bluez_modules():
-    try:
-        import dbus
-        import dbus.mainloop.glib
-        from gi.repository import GLib
-    except ImportError as exc:
-        raise DeviceError(
-            "Missing BlueZ Python dependencies. Install python3-dbus and python3-gi."
-        ) from exc
-    return dbus, GLib
-
-
-def _start_discovery(adapter, dbus_module, log_fn) -> bool:
-    """
-    Start BLE discovery the way bluetoothctl does:
-    SetDiscoveryFilter first, then StartDiscovery.
-    Tries progressively looser filters so it always has the best chance.
-    Returns True if discovery was started successfully.
-    """
-    attempts = [
-        {"Transport": dbus_module.String("le")},   # BLE only — ideal for wristbands
-        {"Transport": dbus_module.String("auto")},  # BLE + classic auto-select
-        {},                                          # no filter — widest net
-    ]
-    for flt in attempts:
-        try:
-            adapter.SetDiscoveryFilter(flt)
-            adapter.StartDiscovery()
-            transport = flt.get("Transport", "all")
-            log_fn(f"discovery started (transport={transport})")
-            return True
-        except Exception as exc:
-            log_fn(f"discovery attempt failed ({exc}), trying next filter")
-    return False
-
-
-def _hci_adapters_in_os() -> list[str]:
-    """Return hci adapter names visible to the kernel (UP or DOWN)."""
-    import re
-    try:
-        r = subprocess.run(["hciconfig", "-a"], timeout=5, capture_output=True, text=True)
-        return re.findall(r"^(hci\d+):", r.stdout, re.MULTILINE)
-    except Exception:
-        return []
-
-
-def _shell_enable_bluetooth(hci: str, log_fn) -> None:
-    """Escalating best-effort recovery: rfkill → hciconfig → bluetoothctl → systemctl."""
-
-    def _run(cmd: list[str], t: int = 5) -> bool:
-        try:
-            log_fn(f"shell: {' '.join(cmd)}")
-            r = subprocess.run(cmd, timeout=t, capture_output=True)
-            return r.returncode == 0
-        except Exception:
-            return False
-
-    def _run_with_fallback(
-        primary: list[str],
-        fallback: list[str],
-        *,
-        primary_timeout: int = 30,
-        fallback_timeout: int = 15,
-    ) -> bool:
-        primary_text = " ".join(primary)
-        fallback_text = " ".join(fallback)
-        try:
-            log_fn(f"shell: {primary_text}")
-            completed = subprocess.run(
-                primary,
-                timeout=primary_timeout,
-                capture_output=True,
-                text=True,
-            )
-            if completed.returncode == 0:
-                log_fn("shell: privileged recovery step completed")
-                return True
-            details = (completed.stderr or completed.stdout).strip()
-            if details:
-                log_fn(f"shell: privileged recovery step failed ({details})")
-            log_fn(f"shell: continuing recovery without privileges via {fallback_text}")
-        except subprocess.TimeoutExpired:
-            log_fn(
-                f"shell: privileged recovery step did not complete within {primary_timeout}s"
-            )
-            log_fn(f"shell: continuing recovery without privileges via {fallback_text}")
-        except Exception as exc:
-            log_fn(f"shell: privileged recovery step failed ({exc})")
-            log_fn(f"shell: continuing recovery without privileges via {fallback_text}")
-
-        return _run(fallback, t=fallback_timeout)
-
-    # 1. rfkill unblock (soft/hard block)
-    _run(["rfkill", "unblock", "bluetooth"]) or _run(["rfkill", "unblock", "all"])
-    time.sleep(0.5)
-
-    # 2. hciconfig <hci> up — try direct then non-interactive sudo
-    if not _run(["hciconfig", hci, "up"]):
-        _run_with_fallback(
-            ["sudo", "-n", "hciconfig", hci, "up"],
-            ["hciconfig", hci, "up"],
-            primary_timeout=30,
-            fallback_timeout=10,
-        )
-    time.sleep(0.5)
-
-    # 3. bluetoothctl power on
-    try:
-        log_fn("shell: bluetoothctl power on")
-        r = subprocess.run(
-            ["bluetoothctl", "power", "on"],
-            timeout=10,
-            capture_output=True,
-            text=True,
-        )
-        out = (r.stdout + r.stderr).strip()
-        if out:
-            log_fn(f"bluetoothctl: {out}")
-    except Exception:
-        pass
-    time.sleep(1.0)
-
-    # 4. Brief bluetoothctl scan le warm-up — wakes up the BLE stack
-    try:
-        log_fn("shell: bluetoothctl scan le (warm-up)")
-        subprocess.run(
-            ["timeout", "3", "bluetoothctl", "scan", "le"],
-            timeout=5,
-            capture_output=True,
-        )
-    except Exception:
-        pass
-    time.sleep(1.0)
-
-    # 5. Restart bluetooth service (non-interactive sudo, then plain)
-    _run_with_fallback(
-        ["sudo", "-n", "systemctl", "restart", "bluetooth.service"],
-        ["systemctl", "restart", "bluetooth.service"],
-        primary_timeout=30,
-        fallback_timeout=15,
-    )
-    time.sleep(3.0)
+from ._bluez import (
+    DeviceError,
+    _is_in_progress_error,
+    _is_not_connected_error,
+    _load_bluez_modules,
+    _start_discovery,
+    _hci_adapters_in_os,
+    _shell_enable_bluetooth,
+)
+from ._constants import (
+    APP_TYPE_CALL,
+    APP_TYPE_SMS,
+    APP_TYPES,
+    ADAPTER_IFACE,
+    BLUEZ_SVC,
+    CAMERA_BUTTON_DEDUP_SECONDS,
+    CAMERA_BUTTON_EVENT,
+    CAMERA_MODE_ENTER_CMD,
+    CAMERA_MODE_EXIT_CMD,
+    CMD_GET_CURRENT_POWER,
+    CMD_GET_CURRENT_STEP,
+    CMD_GET_DEVICE_STATE,
+    CMD_GET_HART_SNAPSHOT,
+    CMD_SET_NOTICE_ALL,
+    DEVICE_IFACE,
+    DEVICE_NAME_UUID_PREFIX,
+    END_MESSAGE,
+    FF01_UUID_PREFIX,
+    FF02_UUID_PREFIX,
+    FIND_DEVICE_CMD,
+    GATT_IFACE,
+    OM_IFACE,
+    PROPS_IFACE,
+)
+from ._dialer import decode_dialer_symbols, format_calibration_report
+from ._health import (
+    decode_hart_history,
+    decode_hart_snapshot,
+    decode_steps_snapshot,
+    frame_health_hist_query,
+)
+from ._protocol import (
+    frame_message_part,
+    frame_message_type,
+    frame_set_device_state,
+    frame_set_time,
+)
 
 
 def _recover_after_not_connected(device: "C60A82CDevice", exc: Exception) -> None:
@@ -253,100 +90,6 @@ def _run_with_notify_retries(
             time.sleep(1.0)
     assert last_exc is not None
     raise last_exc
-
-
-def checksum(frame: list[int]) -> int:
-    total = 0
-    for byte in frame:
-        total = (total + byte) & 0xFF
-    return ((total * 0x56) + 0x5A) & 0xFF
-
-
-def frame_set_device_state(state_payload: list[int]) -> list[int]:
-    payload = list(state_payload)
-    if len(payload) >= 9:
-        payload[8] = 0x01
-    if len(payload) >= 15:
-        payload[14] = 0x02
-    frame = [0x02, len(payload) & 0xFF, (len(payload) >> 8) & 0xFF] + payload
-    return frame + [checksum(frame)]
-
-
-def frame_set_time(now: dt.datetime | None = None) -> list[int]:
-    now = now or dt.datetime.now()
-    payload = [
-        now.year & 0xFF,
-        (now.year >> 8) & 0xFF,
-        now.month,
-        now.day,
-        now.hour,
-        now.minute,
-        now.second,
-        0x00,
-    ]
-    frame = [0x04, len(payload) & 0xFF, (len(payload) >> 8) & 0xFF] + payload
-    return frame + [checksum(frame)]
-
-
-def frame_message_type(app_type: int) -> list[int]:
-    frame = [0x0A, 0x02, 0x00, 0x00, app_type]
-    return frame + [checksum(frame)]
-
-
-def frame_message_part(kind: int, text: str, max_len: int) -> list[int]:
-    payload_bytes = list(text.encode("utf-8")[:max_len])
-    payload_length = 1 + len(payload_bytes)
-    frame = [0x0A, payload_length & 0xFF, (payload_length >> 8) & 0xFF, kind] + payload_bytes
-    return frame + [checksum(frame)]
-
-
-def decode_dialer_symbols(symbols: list[str]) -> str | None:
-    armed = False
-    digits: list[str] = []
-    taps = 0
-
-    for symbol in symbols:
-        if not armed:
-            if symbol == "K":
-                armed = True
-            continue
-
-        if symbol == "T":
-            taps += 1
-            continue
-
-        if symbol != "K":
-            continue
-
-        if taps == 0:
-            return "".join(digits) if digits else None
-
-        digits.append(str(taps))
-        taps = 0
-
-    return None
-
-
-def format_calibration_report(press_times: list[float]) -> str:
-    if not press_times:
-        return "CALIBRATION\npresses=0\n"
-
-    base = press_times[0]
-    relative = [timestamp - base for timestamp in press_times]
-    deltas = [press_times[index] - press_times[index - 1] for index in range(1, len(press_times))]
-
-    lines = [
-        "CALIBRATION",
-        f"presses={len(press_times)}",
-        "relative_seconds=" + ",".join(f"{value:.3f}" for value in relative),
-        "delta_seconds=" + ",".join(f"{value:.3f}" for value in deltas) if deltas else "delta_seconds=",
-    ]
-
-    if deltas:
-        suggested_gap = max(deltas) + 0.25
-        lines.append(f"suggested_cluster_gap={suggested_gap:.3f}")
-
-    return "\n".join(lines) + "\n"
 
 
 @dataclass(slots=True)
@@ -618,7 +361,6 @@ class C60A82CDevice:
         if not device_path:
             found_any = self._preflight_scan(bus, dbus_module)
             if not found_any:
-                # No devices at all — deep recovery then retry preflight
                 self._log("no devices visible, triggering deep recovery")
                 _shell_enable_bluetooth(self.hci, self._log)
                 found_any = self._preflight_scan(bus, dbus_module, scan_timeout=8.0)
@@ -751,6 +493,81 @@ class C60A82CDevice:
 
         return _run_with_notify_retries(self, operation, context="ff01-command")
 
+    def _run_ff01_fragmented_command(
+        self,
+        command: list[int],
+        *,
+        response_cmd: int,
+        timeout_ms: int = 30_000,
+    ) -> list[int]:
+        """Like _run_ff01_command but reassembles multi-chunk BLE notifications.
+
+        Accumulates incoming 20-byte chunks into a buffer, determines the total
+        expected frame length from the 3-byte header (cmd + len_lo + len_hi), and
+        only resolves once the full frame has arrived.
+        """
+        def operation() -> list[int]:
+            bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
+            _dbus, GLib = _load_bluez_modules()
+            result: dict[str, object] = {}
+            loop = GLib.MainLoop()
+            buf: list[int] = []
+            expected_len: list[int | None] = [None]
+
+            def on_changed(_iface, changed, _invalidated, path=None):
+                if "Value" not in changed:
+                    return
+                chunk = [int(b) for b in changed["Value"]]
+                self._log(
+                    f"FF01 chunk ({len(chunk)}B): {' '.join(f'{b:02x}' for b in chunk)}"
+                )
+                buf.extend(chunk)
+
+                if expected_len[0] is None and len(buf) >= 3:
+                    payload_len = buf[1] | (buf[2] << 8)
+                    expected_len[0] = 3 + payload_len + 1  # header + payload + checksum
+
+                if expected_len[0] is not None and len(buf) >= expected_len[0]:
+                    frame = buf[:expected_len[0]]
+                    if frame[0] == response_cmd:
+                        result["data"] = frame
+                        loop.quit()
+
+            bus.add_signal_receiver(
+                on_changed,
+                signal_name="PropertiesChanged",
+                dbus_interface=PROPS_IFACE,
+                path=ff01_path,
+                path_keyword="path",
+            )
+
+            def run():
+                try:
+                    ff01.StartNotify()
+                    time.sleep(0.3)
+                    self._log(f"sending {' '.join(f'{b:02x}' for b in command)}")
+                    self._write_value(ff02, command, dbus_module)
+                    GLib.timeout_add(timeout_ms, loop.quit)
+                except Exception as exc:
+                    result["error"] = exc
+                    loop.quit()
+
+            GLib.timeout_add(200, run)
+            loop.run()
+
+            try:
+                ff01.StopNotify()
+            except Exception:
+                pass
+
+            if "error" in result:
+                raise DeviceError(f"Could not start BLE notifications: {result['error']}") from result["error"]
+            if "data" not in result:
+                raise DeviceError("No response received (timeout)")
+            return result["data"]
+
+        return _run_with_notify_retries(self, operation, context="ff01-fragmented-command")
+
     def _run_notification_sequence(self, frames: list[list[int]], *, do_init: bool) -> None:
         def operation() -> None:
             bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
@@ -847,6 +664,10 @@ class C60A82CDevice:
 
         _run_with_notify_retries(self, operation, context="notify-sequence")
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def read_info(self) -> dict[str, str]:
         bus, dbus_module = self._bus()
         self._ensure_connected(bus, dbus_module)
@@ -864,6 +685,47 @@ class C60A82CDevice:
             matcher=lambda data: len(data) >= 4 and data[0] == 0xA7,
         )
         return int(response[3])
+
+    def read_health(self, date: dt.date | None = None) -> dict[str, object]:
+        """Read current health snapshot and optionally historical data for one day.
+
+        Returns a dict with up to three keys:
+          - "snapshot_steps": {"steps", "calories_kcal", "distance_m"}
+          - "snapshot_hart":  {"hr_bpm", "bp_diastolic_mmhg", "bp_systolic_mmhg", "spo2_pct"}
+          - "history_hart":   list of per-minute records for *date* (only if date is given)
+        """
+        result: dict[str, object] = {}
+
+        # Current steps / calories / distance
+        step_data = self._run_ff01_command(
+            CMD_GET_CURRENT_STEP,
+            matcher=lambda data: len(data) >= 4 and data[0] == 0xA0 and data[3] == 0x00,
+        )
+        snap_steps = decode_steps_snapshot(step_data)
+        if snap_steps is not None:
+            result["snapshot_steps"] = snap_steps
+
+        # Current HR / BP / SpO2
+        hart_data = self._run_ff01_command(
+            CMD_GET_HART_SNAPSHOT,
+            matcher=lambda data: len(data) >= 4 and data[0] == 0xA1 and data[3] == 0x00,
+        )
+        snap_hart = decode_hart_snapshot(hart_data)
+        if snap_hart is not None:
+            result["snapshot_hart"] = snap_hart
+
+        # Historical HR / BP / SpO2 (multi-chunk reassembly)
+        if date is not None:
+            hist_raw = self._run_ff01_fragmented_command(
+                frame_health_hist_query(0x21, date),
+                response_cmd=0xA1,
+                timeout_ms=30_000,
+            )
+            hist = decode_hart_history(hist_raw, date)
+            if hist is not None:
+                result["history_hart"] = hist
+
+        return result
 
     def find_device(self) -> None:
         self._run_ff01_command(
