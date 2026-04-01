@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import base64
 import json
@@ -10,6 +11,7 @@ import time
 from typing import Any
 from urllib import error, parse, request
 
+from .concurrency import BleLockBusyError, ble_session
 from .devices.c60_a82c import C60A82CDevice, DeviceError
 
 
@@ -65,6 +67,12 @@ class RelayContext:
     def device(self) -> C60A82CDevice:
         return C60A82CDevice(mac=self.mac, hci=self.hci, debug=self.debug)
 
+    @contextmanager
+    def ble_session(self, *, blocking: bool, reason: str):
+        with self.lock:
+            with ble_session(blocking=blocking, reason=reason):
+                yield
+
 
 class LocalCommandHandler(BaseHTTPRequestHandler):
     server_version = "wrish-relay/0.1"
@@ -97,17 +105,17 @@ class LocalCommandHandler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True})
                 return
             if parsed.path == "/battery":
-                with self.context.lock:
+                with self.context.ble_session(blocking=True, reason="relay-battery"):
                     battery = self.context.device().read_battery()
                 self._json(200, {"battery": battery})
                 return
             if parsed.path == "/find":
-                with self.context.lock:
+                with self.context.ble_session(blocking=True, reason="relay-find"):
                     self.context.device().find_device()
                 self._json(200, {"ok": True, "action": "find"})
                 return
             if parsed.path == "/vibrate":
-                with self.context.lock:
+                with self.context.ble_session(blocking=True, reason="relay-vibrate"):
                     self.context.device().vibrate()
                 self._json(200, {"ok": True, "action": "vibrate"})
                 return
@@ -116,14 +124,14 @@ class LocalCommandHandler(BaseHTTPRequestHandler):
                 if not sender:
                     self._json(400, {"error": "missing 'from' query parameter"})
                     return
-                with self.context.lock:
+                with self.context.ble_session(blocking=True, reason="relay-sms"):
                     self.context.device().send_sms(sender=sender, text=body, do_init=True)
                 self._json(200, {"ok": True, "action": "sms", "from": sender})
                 return
             if parsed.path == "/call":
                 caller = self._first(params, "from", "caller")
                 number = self._first(params, "number")
-                with self.context.lock:
+                with self.context.ble_session(blocking=True, reason="relay-call"):
                     self.context.device().send_call(caller=caller or "", number=number or "", do_init=True)
                 self._json(200, {"ok": True, "action": "call", "from": caller, "number": number})
                 return
@@ -133,7 +141,7 @@ class LocalCommandHandler(BaseHTTPRequestHandler):
                     self._json(400, {"error": "missing 'title' query parameter"})
                     return
                 app = self._first(params, "app") or "whatsapp"
-                with self.context.lock:
+                with self.context.ble_session(blocking=True, reason="relay-notify"):
                     self.context.device().send_notification(
                         app_name=app,
                         title=title,
@@ -390,28 +398,36 @@ def _run_sentinel_loop(
     while True:
         now = time.monotonic()
 
-        # Proactive adapter self-diagnosis every DIAGNOSIS_INTERVAL seconds
-        if now - last_diagnosis >= _SENTINEL_DIAGNOSIS_INTERVAL:
-            result = device.diagnose_adapter()
-            last_diagnosis = now
-            if not result["powered"] and debug:
-                print(f"[sentinel] diagnosis: {result['error']}")
-
         try:
-            connected = device.is_connected()
-            if not connected:
-                announced = False
-                if debug:
-                    print("[sentinel] attempting connection...")
-                device.connect()
-                connected = True
+            with ble_session(blocking=False, reason="relay-sentinel"):
+                # Proactive adapter self-diagnosis every DIAGNOSIS_INTERVAL seconds
+                if now - last_diagnosis >= _SENTINEL_DIAGNOSIS_INTERVAL:
+                    result = device.diagnose_adapter()
+                    last_diagnosis = now
+                    if debug:
+                        if result["powered"]:
+                            print("[sentinel] periodic diagnosis ok")
+                        elif result["error"]:
+                            print(f"[sentinel] periodic diagnosis failed: {result['error']}")
 
-            if connected and not announced:
-                if debug:
-                    print("[sentinel] connected, sending notification...")
-                device.send_notification(app_name=app, title=title, body=body, do_init=True)
-                print("Connected!")
-                announced = True
+                connected = device.is_connected()
+                if not connected:
+                    announced = False
+                    if debug:
+                        print("[sentinel] recovery attempt started")
+                    device.connect()
+                    connected = True
+
+                if connected and not announced:
+                    if debug:
+                        print("[sentinel] connected, sending notification...")
+                    device.send_notification(app_name=app, title=title, body=body, do_init=True)
+                    if debug:
+                        print("[sentinel] notification sent")
+                    announced = True
+        except BleLockBusyError:
+            if debug:
+                print("[sentinel] paused, BLE busy with another command")
         except Exception as exc:
             announced = False
             if debug:

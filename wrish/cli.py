@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import time
 
+from .concurrency import BleLockBusyError, ble_lock_status, ble_session
 from .config import load_config
 from .devices.c60_a82c import (
     C60A82CDevice,
@@ -83,6 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
     button.add_argument("--count", type=int, default=None, help="Stop after N button events")
     button.set_defaults(handler=_handle_button)
 
+    lock_status = subparsers.add_parser("lock-status", help="Show the shared BLE lock status")
+    lock_status.set_defaults(handler=_handle_lock_status)
+
     dialer = subparsers.add_parser("dialer", help="Decode K/T button sequences into dialed numbers")
     dialer.add_argument("--arm-timeout", type=float, default=10.0, help="Exit if the opening T T T sequence is not received in time")
     dialer.add_argument("--cluster-gap", type=float, default=0.5, help="Max gap in seconds between presses of the same cluster")
@@ -105,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     relay.add_argument("--sentinel-interval", default=5.0, type=float, help="Sentinel check interval in seconds")
     relay.add_argument("--sentinel-app", default="whatsapp", help="Notification app type used by sentinel")
     relay.add_argument("--sentinel-title", default="wrish", help="Sentinel notification title")
-    relay.add_argument("--sentinel-body", default="Braccialetto connesso", help="Sentinel notification body")
+    relay.add_argument("--sentinel-body", default="Connected", help="Sentinel notification body")
     relay.set_defaults(handler=_handle_relay)
 
     sentinel = subparsers.add_parser("sentinel", help="Keep reconnecting to the bracelet and announce when connected")
@@ -114,7 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     sentinel.add_argument("--title", default="wrish", help="Notification title sent on successful connection")
     sentinel.add_argument(
         "--body",
-        default="Braccialetto connesso",
+        default="Connected",
         help="Notification body sent on successful connection",
     )
     sentinel.set_defaults(handler=_handle_sentinel)
@@ -134,6 +138,11 @@ def build_device(args: argparse.Namespace) -> C60A82CDevice:
     return C60A82CDevice(mac=args.mac, hci=args.hci, debug=args.debug)
 
 
+def _run_with_ble_lock(args: argparse.Namespace, action, *, reason: str):
+    with ble_session(blocking=True, reason=reason):
+        return action(build_device(args))
+
+
 def _handle_info(args: argparse.Namespace) -> int:
     device = build_device(args)
     info = device.read_info()
@@ -143,46 +152,44 @@ def _handle_info(args: argparse.Namespace) -> int:
 
 
 def _handle_battery(args: argparse.Namespace) -> int:
-    device = build_device(args)
-    percent = device.read_battery()
+    percent = _run_with_ble_lock(args, lambda device: device.read_battery(), reason="battery")
     print(f"Battery: {percent}%")
     return 0
 
 
 def _handle_find(args: argparse.Namespace) -> int:
-    device = build_device(args)
-    device.find_device()
+    _run_with_ble_lock(args, lambda device: device.find_device(), reason="find")
     print("Bracelet found (vibrating)")
     return 0
 
 
 def _handle_vibrate(args: argparse.Namespace) -> int:
-    device = build_device(args)
     if args.seconds is None:
-        device.vibrate()
+        _run_with_ble_lock(args, lambda device: device.vibrate(), reason="vibrate")
         print("Vibration sent")
         return 0
 
+    device = build_device(args)
     deadline = time.monotonic() + max(args.seconds, 0.0)
     interval = max(args.interval, 0.2)
     count = 0
 
-    while time.monotonic() < deadline:
-        device.vibrate()
-        count += 1
-        remaining = max(0.0, deadline - time.monotonic())
-        print(f"Vibration #{count} sent, remaining {remaining:.1f}s")
-        if remaining <= 0:
-            break
-        time.sleep(min(interval, remaining))
+    with ble_session(blocking=True, reason="vibrate-loop"):
+        while time.monotonic() < deadline:
+            device.vibrate()
+            count += 1
+            remaining = max(0.0, deadline - time.monotonic())
+            print(f"Vibration #{count} sent, remaining {remaining:.1f}s")
+            if remaining <= 0:
+                break
+            time.sleep(min(interval, remaining))
 
     print(f"Loop finished after {count} vibrations")
     return 0
 
 
 def _handle_raw(args: argparse.Namespace) -> int:
-    device = build_device(args)
-    response = device.send_raw_hex(args.bytes)
+    response = _run_with_ble_lock(args, lambda device: device.send_raw_hex(args.bytes), reason="raw")
     if response is None:
         print("No response received")
     else:
@@ -191,45 +198,73 @@ def _handle_raw(args: argparse.Namespace) -> int:
 
 
 def _handle_notify(args: argparse.Namespace) -> int:
-    device = build_device(args)
-    device.send_notification(
-        app_name=args.app,
-        title=args.title,
-        body=args.body,
-        do_init=not args.no_init,
-    )
+    def action(device: C60A82CDevice):
+        device.send_notification(
+            app_name=args.app,
+            title=args.title,
+            body=args.body,
+            do_init=not args.no_init,
+        )
+
+    _run_with_ble_lock(args, action, reason="notify")
     print("Notification sent")
     return 0
 
 
 def _handle_sms(args: argparse.Namespace) -> int:
-    device = build_device(args)
-    device.send_sms(sender=args.sender, text=args.body, do_init=not args.no_init)
+    def action(device: C60A82CDevice):
+        device.send_sms(sender=args.sender, text=args.body, do_init=not args.no_init)
+
+    _run_with_ble_lock(args, action, reason="sms")
     print("SMS sent")
     return 0
 
 
 def _handle_call(args: argparse.Namespace) -> int:
-    device = build_device(args)
-    device.send_call(caller=args.caller, number=args.number, do_init=not args.no_init)
+    def action(device: C60A82CDevice):
+        device.send_call(caller=args.caller, number=args.number, do_init=not args.no_init)
+
+    _run_with_ble_lock(args, action, reason="call")
     print("Call sent")
     return 0
 
 
 def _handle_button(args: argparse.Namespace) -> int:
-    device = build_device(args)
     print("Listening for bracelet button events...")
-    count = device.listen_for_button(timeout=args.timeout, max_events=args.count)
+    count = _run_with_ble_lock(
+        args,
+        lambda device: device.listen_for_button(timeout=args.timeout, max_events=args.count),
+        reason="button",
+    )
     print(f"Button events received: {count}")
+    return 0
+
+
+def _handle_lock_status(args: argparse.Namespace) -> int:
+    status = ble_lock_status()
+    if status["busy"]:
+        details = [str(status["reason"])]
+        if status.get("pid") is not None:
+            details.append(f"pid={status['pid']}")
+        age_seconds = status.get("age_seconds")
+        if isinstance(age_seconds, (int, float)):
+            details.append(f"age={age_seconds:.1f}s")
+        print(f"BLE lock: busy ({', '.join(details)})")
+    else:
+        print("BLE lock: free")
+    print(f"Path: {status['path']}")
     return 0
 
 
 def _handle_dialer(args: argparse.Namespace) -> int:
     if args.calibrate:
-        device = build_device(args)
         print("Dialer calibration: perform one K cluster now.")
         print("When finished, paste the output back here.")
-        report = device.calibrate_button_cluster(timeout=args.timeout)
+        report = _run_with_ble_lock(
+            args,
+            lambda device: device.calibrate_button_cluster(timeout=args.timeout),
+            reason="dialer-calibrate",
+        )
         print(report, end="")
         return 0
 
@@ -242,15 +277,18 @@ def _handle_dialer(args: argparse.Namespace) -> int:
             print(f"N {result}")
         return 0
 
-    device = build_device(args)
     print("Dialer listening...")
     print("Open sequence: T T T")
     print("Close sequence after open: K K")
-    status = device.run_dialer(
-        arm_timeout=args.arm_timeout,
-        cluster_gap=args.cluster_gap,
-        k_min=args.k_min,
-        k_max=args.k_max,
+    status = _run_with_ble_lock(
+        args,
+        lambda device: device.run_dialer(
+            arm_timeout=args.arm_timeout,
+            cluster_gap=args.cluster_gap,
+            k_min=args.k_min,
+            k_max=args.k_max,
+        ),
+        reason="dialer",
     )
     print(f"Dialer status: {status}")
     return 0
@@ -276,45 +314,97 @@ def _handle_relay(args: argparse.Namespace) -> int:
 _SENTINEL_DIAGNOSIS_INTERVAL = 300  # seconds between proactive adapter health checks
 
 
+def _sentinel_state(status: dict[str, object]) -> str:
+    if not status.get("adapter_present", False):
+        return "adapter-missing"
+    if not status.get("adapter_powered", False):
+        return "adapter-off"
+    if not status.get("present", False):
+        return "device-missing"
+    if not status.get("connected", False):
+        return "device-disconnected"
+    return "connected"
+
+
 def _handle_sentinel(args: argparse.Namespace) -> int:
     device = build_device(args)
     announced = False
     last_diagnosis = 0.0
+    last_state = "unknown"
 
     while True:
         now = time.monotonic()
 
-        # Proactive adapter self-diagnosis every DIAGNOSIS_INTERVAL seconds
-        if now - last_diagnosis >= _SENTINEL_DIAGNOSIS_INTERVAL:
-            result = device.diagnose_adapter()
-            last_diagnosis = now
-            if not result["powered"] and args.debug:
-                print(f"Sentinel diagnosis: {result['error']}", file=sys.stderr)
-
         try:
-            connected = device.is_connected()
-            if not connected:
+            status = device.status()
+            state = _sentinel_state(status)
+
+            if state != last_state and args.debug:
+                print(f"Sentinel: state={state}", file=sys.stderr)
+            last_state = state
+
+            if state != "connected":
                 announced = False
                 if args.debug:
-                    print("Sentinel: attempting connection...", file=sys.stderr)
-                device.connect()
-                connected = True
+                    print("Sentinel: recovery attempt started", file=sys.stderr)
 
-            if connected and not announced:
+                # Proactive adapter self-diagnosis on degraded state and periodically.
+                if state.startswith("adapter-") or (now - last_diagnosis >= _SENTINEL_DIAGNOSIS_INTERVAL):
+                    if args.debug:
+                        print(f"Sentinel: diagnosis started (state={state})", file=sys.stderr)
+                    result = device.diagnose_adapter()
+                    last_diagnosis = now
+                    if args.debug:
+                        if result["powered"]:
+                            print("Sentinel: diagnosis ok", file=sys.stderr)
+                        elif result["error"]:
+                            print(f"Sentinel: diagnosis failed: {result['error']}", file=sys.stderr)
+
+                try:
+                    with ble_session(blocking=False, reason="sentinel"):
+                        device.connect()
+                        status = device.status()
+                        state = _sentinel_state(status)
+                        last_state = state
+                        if args.debug:
+                            print(f"Sentinel: recovery result state={state}", file=sys.stderr)
+                except BleLockBusyError:
+                    if args.debug:
+                        print("Sentinel: paused, BLE busy with another command", file=sys.stderr)
+                    time.sleep(max(args.interval, 0.2))
+                    continue
+            elif now - last_diagnosis >= _SENTINEL_DIAGNOSIS_INTERVAL:
                 if args.debug:
-                    print("Sentinel: connected, sending notification...", file=sys.stderr)
-                device.send_notification(
-                    app_name=args.app,
-                    title=args.title,
-                    body=args.body,
-                    do_init=True,
-                )
-                print("Connected!")
-                announced = True
+                    print("Sentinel: periodic diagnosis started", file=sys.stderr)
+                result = device.diagnose_adapter()
+                last_diagnosis = now
+                if args.debug:
+                    if result["powered"]:
+                        print("Sentinel: periodic diagnosis ok", file=sys.stderr)
+                    elif result["error"]:
+                        print(f"Sentinel: periodic diagnosis failed: {result['error']}", file=sys.stderr)
+
+            if state == "connected" and not announced:
+                try:
+                    with ble_session(blocking=False, reason="sentinel-notify"):
+                        if args.debug:
+                            print("Sentinel: connected, sending notification...", file=sys.stderr)
+                        device.send_notification(
+                            app_name=args.app,
+                            title=args.title,
+                            body=args.body,
+                            do_init=True,
+                        )
+                        if args.debug:
+                            print("Sentinel: notification sent", file=sys.stderr)
+                        announced = True
+                except BleLockBusyError:
+                    if args.debug:
+                        print("Sentinel: notification deferred, BLE busy with another command", file=sys.stderr)
         except DeviceError as exc:
             announced = False
             if args.debug:
-                print(f"Sentinel: {exc}", file=sys.stderr)
+                print(f"Sentinel: recovery failed: {exc}", file=sys.stderr)
 
         time.sleep(max(args.interval, 0.2))
 
