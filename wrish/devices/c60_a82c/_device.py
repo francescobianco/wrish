@@ -689,15 +689,20 @@ class C60A82CDevice:
     def read_health(self, date: dt.date | None = None) -> dict[str, object]:
         """Read current health snapshot and optionally historical data for one day.
 
+        Always fetches today's historical HR data to derive the real device-side
+        timestamp of the last measurement (minute precision).  If *date* is today
+        those records are reused; otherwise a second historical fetch is issued.
+
         Returns a dict with up to four keys:
-          - "timestamp":      ISO-8601 string of when the snapshot was taken
+          - "last_measured":  ISO-8601 datetime of the last recorded measurement
+                              on the device (YYYY-MM-DDTHH:MM), derived from the
+                              most recent non-zero record in today's history.
           - "snapshot_steps": {"steps", "calories_kcal", "distance_m"}
           - "snapshot_hart":  {"hr_bpm", "bp_diastolic_mmhg", "bp_systolic_mmhg", "spo2_pct"}
           - "history_hart":   list of per-minute records for *date* (only if date is given)
         """
-        result: dict[str, object] = {
-            "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
-        }
+        result: dict[str, object] = {}
+        today = dt.date.today()
 
         # Current steps / calories / distance
         step_data = self._run_ff01_command(
@@ -717,16 +722,33 @@ class C60A82CDevice:
         if snap_hart is not None:
             result["snapshot_hart"] = snap_hart
 
-        # Historical HR / BP / SpO2 (multi-chunk reassembly)
+        # Fetch today's historical HR to get the real last-measurement timestamp.
+        # decode_hart_history skips all-zero records, so the last element is the
+        # last minute on the device that had an actual reading.
+        today_raw = self._run_ff01_fragmented_command(
+            frame_health_hist_query(0x21, today),
+            response_cmd=0xA1,
+            timeout_ms=30_000,
+        )
+        hist_today = decode_hart_history(today_raw, today)
+        if hist_today:
+            last = hist_today[-1]
+            result["last_measured"] = f"{today.isoformat()}T{last['time']}"
+
+        # Historical data for the requested date.
+        # Reuse today's records if date == today to avoid a second BLE fetch.
         if date is not None:
-            hist_raw = self._run_ff01_fragmented_command(
-                frame_health_hist_query(0x21, date),
-                response_cmd=0xA1,
-                timeout_ms=30_000,
-            )
-            hist = decode_hart_history(hist_raw, date)
-            if hist is not None:
-                result["history_hart"] = hist
+            if date == today:
+                result["history_hart"] = hist_today if hist_today is not None else []
+            else:
+                hist_raw = self._run_ff01_fragmented_command(
+                    frame_health_hist_query(0x21, date),
+                    response_cmd=0xA1,
+                    timeout_ms=30_000,
+                )
+                hist = decode_hart_history(hist_raw, date)
+                if hist is not None:
+                    result["history_hart"] = hist
 
         return result
 

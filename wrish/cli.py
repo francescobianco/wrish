@@ -197,7 +197,8 @@ def _handle_health(args: argparse.Namespace) -> int:
         print(json.dumps(data, indent=2))
         return 0
 
-    print(f"Timestamp: {data.get('timestamp', '?')}")
+    if "last_measured" in data:
+        print(f"Last measured: {data['last_measured']}")
 
     if "snapshot_steps" in data:
         s = data["snapshot_steps"]
