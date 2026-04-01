@@ -98,8 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     button.add_argument("--count", type=int, default=None, help="Stop after N button events")
     button.set_defaults(handler=_handle_button)
 
-    game = subparsers.add_parser("game", help="Reaction-time game played with the bracelet button")
-    game.add_argument("--rounds", type=int, default=5, help="Number of rounds (default: 5)")
+    game = subparsers.add_parser("game", help="Geometry Dash terminal game — bracelet button = jump")
     game.set_defaults(handler=_handle_game)
 
     listen = subparsers.add_parser("listen", help="Listen for the bracelet find-phone trigger on FF01")
@@ -327,124 +326,146 @@ def _handle_button(args: argparse.Namespace) -> int:
 def _handle_game(args: argparse.Namespace) -> int:
     import queue
     import random
+    import shutil
     import threading
     import time as _time
 
-    # ── ANSI colours ──────────────────────────────────────────────────
-    R  = "\033[1;31m"   # red bold
-    G  = "\033[1;32m"   # green bold
-    Y  = "\033[1;33m"   # yellow bold
-    C  = "\033[1;36m"   # cyan bold
-    B  = "\033[1m"      # bold
-    E  = "\033[0m"      # reset
-    CL = "\033[2J\033[H"  # clear screen + home
+    # ── Display constants ──────────────────────────────────────────────
+    W = min(shutil.get_terminal_size().columns - 2, 70)
+    PLAY_H = 4           # usable play rows (0 = top, GROUND = bottom)
+    GROUND = PLAY_H - 1  # row index of the ground
+    CHAR_X = 5           # fixed horizontal column of the character
+    TICK = 0.08          # seconds per frame
 
-    rounds = args.rounds
+    RESET       = "\033[0m"
+    BOLD        = "\033[1m"
+    RED         = "\033[1;31m"
+    HIDE_CURSOR = "\033[?25l"
+    SHOW_CURSOR = "\033[?25h"
+    CLEAR       = "\033[2J\033[H"
+    ERASE_LINE  = "\033[2K"
 
-    def _banner(r):
-        print(f"{CL}{B}🎮  Reaction Game  —  Round {r}/{rounds}{E}")
-        print("─" * 44)
+    CHAR_GROUND = "■"    # on the ground
+    CHAR_AIR    = "●"    # in the air
+    SPIKE       = "▲"
+    GROUND_FILL = "═"
 
-    def _grade(ms):
-        if ms <= 150:
-            return f"{Y}⚡ LIGHTNING!{E}",  900
-        if ms <= 280:
-            return f"{G}🏆 Excellent!{E}",  700
-        if ms <= 420:
-            return f"{G}✓ Good{E}",         500
-        if ms <= 650:
-            return f"~ OK",                 300
-        return f"{R}⏱ Slow…{E}",            max(0, 1000 - ms)
+    # Jump arc: height above GROUND (in rows) at each tick
+    JUMP_ARC = [1, 2, 3, 3, 3, 2, 1, 0]
+    JUMP_LEN = len(JUMP_ARC)
 
-    q: queue.Queue[float] = queue.Queue()
+    # Total lines the game frame occupies (play rows + ground line + status)
+    FRAME_LINES = PLAY_H + 2
+
+    # ── Mutable game state ─────────────────────────────────────────────
+    jump_pos: int = -1        # -1 = on ground; 0..JUMP_LEN-1 = mid-jump
+    char_y: int = GROUND      # current display row of character
+    spikes: list[int] = []    # x positions of active spikes (after moving)
+    score: int = 0
+    speed: int = 1            # columns spikes advance per tick
+    alive: bool = True
+    spike_countdown: int = 20  # ticks until next spike spawns
+
+    q: queue.Queue[bool] = queue.Queue()
     stop = threading.Event()
-    results: list[tuple[int, int] | None] = []
 
-    def _ble(device):
-        device.listen_for_button(on_event=lambda: q.put(_time.monotonic()), stop=stop)
+    def _ble(device) -> None:
+        device.listen_for_button(on_event=lambda: q.put(True), stop=stop)
 
-    def _game_loop(device):
-        # Start BLE listener in background thread
+    def _build_frame() -> list[str]:
+        lines: list[str] = []
+        for r in range(PLAY_H):
+            row = [" "] * W
+            if r == char_y:
+                row[CHAR_X] = CHAR_GROUND if char_y == GROUND else CHAR_AIR
+            if r == GROUND:
+                for sx in spikes:
+                    if 0 <= sx < W and sx != CHAR_X:
+                        row[sx] = SPIKE
+            lines.append("".join(row))
+        lines.append(GROUND_FILL * W)
+        lines.append(f" Score: {score:>5}   Speed: {speed}   [button = jump]")
+        return lines
+
+    def _write_frame(lines: list[str], *, first: bool) -> None:
+        buf: list[str] = []
+        if not first:
+            buf.append(f"\033[{FRAME_LINES}A")
+        for line in lines:
+            buf.append(f"{ERASE_LINE}{line}\r\n")
+        sys.stdout.write("".join(buf))
+        sys.stdout.flush()
+
+    def _game_loop(device) -> None:
+        nonlocal jump_pos, char_y, spikes, score, speed, alive, spike_countdown
+
         t = threading.Thread(target=_ble, args=(device,), daemon=True)
         t.start()
-        _time.sleep(0.8)  # let BLE session establish
+        _time.sleep(0.6)  # let BLE session establish
 
-        print(f"{CL}{B}🎮 Reaction Game{E}  —  {rounds} rounds")
-        print(f"{C}Connect:{E} wait for {B}★ PRESS NOW!{E}, then press the bracelet button.")
-        print(f"Starting in 3 s…")
-        _time.sleep(3.0)
+        sys.stdout.write(HIDE_CURSOR + CLEAR)
+        sys.stdout.write(f"{BOLD}GEOMETRY DASH{RESET}  —  press bracelet button to jump\n\n")
+        sys.stdout.flush()
+        _write_frame(_build_frame(), first=True)
 
-        for r in range(1, rounds + 1):
-            # ── Wait phase ─────────────────────────────────────────
-            delay = random.uniform(2.2, 5.0)
-            deadline = _time.monotonic() + delay
-            _banner(r)
-            print(f"\n  Get ready", end="", flush=True)
-            early = False
+        try:
+            while alive:
+                t0 = _time.monotonic()
 
-            while _time.monotonic() < deadline:
-                _time.sleep(0.35)
-                print(".", end="", flush=True)
+                # ── Input ──────────────────────────────────────────────
                 try:
-                    q.get_nowait()          # discard early press
-                    early = True
-                    break
+                    q.get_nowait()
+                    if jump_pos < 0:    # only jump when on ground
+                        jump_pos = 0
                 except queue.Empty:
                     pass
 
-            if early:
-                _banner(r)
-                print(f"\n  {R}✗ Too early! Wait for the signal.{E}\n")
-                results.append(None)
-                _time.sleep(1.8)
-                continue
+                # ── Physics ────────────────────────────────────────────
+                if jump_pos >= 0:
+                    char_y = GROUND - JUMP_ARC[jump_pos]
+                    jump_pos += 1
+                    if jump_pos >= JUMP_LEN:
+                        jump_pos = -1
+                        char_y = GROUND
+                else:
+                    char_y = GROUND
 
-            # ── Active phase ────────────────────────────────────────
-            _banner(r)
-            print(f"\n  {G}{B}★   PRESS NOW!   ★{E}\n")
-            t0 = _time.monotonic()
+                # ── Move spikes left ───────────────────────────────────
+                moved = [sx - speed for sx in spikes]
 
-            try:
-                press_t = q.get(timeout=1.8)
-                ms = max(0, int((press_t - t0) * 1000))
-                label, score = _grade(ms)
-                results.append((ms, score))
-                _banner(r)
-                print(f"\n  Reaction: {B}{ms} ms{E}  {label}  {C}+{score} pts{E}\n")
-            except queue.Empty:
-                results.append(None)
-                _banner(r)
-                print(f"\n  {R}✗ Missed! No press within 1.8 s.{E}\n")
+                # ── Collision (before removing off-screen spikes) ──────
+                if char_y == GROUND:
+                    for sx in moved:
+                        if sx <= CHAR_X < sx + speed:
+                            alive = False
+                            break
 
-            if r < rounds:
-                _time.sleep(1.8)
+                spikes = [sx for sx in moved if sx >= 0]
 
-        # ── Summary ─────────────────────────────────────────────────
-        stop.set()
-        t.join(timeout=2.0)
+                # ── Spawn spike ────────────────────────────────────────
+                spike_countdown -= 1
+                if spike_countdown <= 0:
+                    spikes.append(W - 1)
+                    spike_countdown = random.randint(14, 32)
 
-        hits = [(ms, sc) for entry in results if entry is not None for ms, sc in [entry]]
-        misses = results.count(None)
-        total_score = sum(sc for _, sc in hits)
+                # ── Score + speed ──────────────────────────────────────
+                score += 1
+                speed = 1 + score // 300
 
-        print(f"\n{CL}{B}🏁  Game Over!{E}")
-        print("═" * 44)
-        for i, entry in enumerate(results, 1):
-            if entry is None:
-                print(f"  Round {i}:  {R}MISS{E}")
-            else:
-                ms, sc = entry
-                print(f"  Round {i}:  {ms:>4} ms   {C}+{sc} pts{E}")
-        print("─" * 44)
-        if hits:
-            best = min(ms for ms, _ in hits)
-            avg  = sum(ms for ms, _ in hits) // len(hits)
-            print(f"  Best:     {B}{best} ms{E}")
-            print(f"  Average:  {avg} ms")
-            print(f"  Misses:   {misses}/{rounds}")
-        else:
-            print(f"  {R}No successful presses.{E}")
-        print(f"  {B}Total score:  {total_score} pts{E}")
+                # ── Render ─────────────────────────────────────────────
+                _write_frame(_build_frame(), first=False)
+
+                elapsed = _time.monotonic() - t0
+                _time.sleep(max(0.0, TICK - elapsed))
+
+        finally:
+            stop.set()
+            t.join(timeout=2.0)
+            sys.stdout.write(SHOW_CURSOR)
+            sys.stdout.flush()
+
+        sys.stdout.write("\n")
+        print(f"{RED}{BOLD}GAME OVER{RESET}   Score: {BOLD}{score}{RESET}")
         print()
 
     _run_with_ble_lock(args, _game_loop, reason="game")
