@@ -271,11 +271,24 @@ def _handle_relay(args: argparse.Namespace) -> int:
     return 0
 
 
+_SENTINEL_DIAGNOSIS_INTERVAL = 300  # seconds between proactive adapter health checks
+
+
 def _handle_sentinel(args: argparse.Namespace) -> int:
     device = build_device(args)
     announced = False
+    last_diagnosis = 0.0
 
     while True:
+        now = time.monotonic()
+
+        # Proactive adapter self-diagnosis every DIAGNOSIS_INTERVAL seconds
+        if now - last_diagnosis >= _SENTINEL_DIAGNOSIS_INTERVAL:
+            result = device.diagnose_adapter()
+            last_diagnosis = now
+            if not result["powered"] and args.debug:
+                print(f"Sentinel diagnosis: {result['error']}", file=sys.stderr)
+
         try:
             connected = device.is_connected()
             if not connected:

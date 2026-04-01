@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import datetime as dt
+import subprocess
 import sys
 import time
 from typing import Callable
@@ -79,6 +80,94 @@ def _load_bluez_modules():
             "Missing BlueZ Python dependencies. Install python3-dbus and python3-gi."
         ) from exc
     return dbus, GLib
+
+
+def _start_discovery(adapter, dbus_module, log_fn) -> bool:
+    """
+    Start BLE discovery the way bluetoothctl does:
+    SetDiscoveryFilter first, then StartDiscovery.
+    Tries progressively looser filters so it always has the best chance.
+    Returns True if discovery was started successfully.
+    """
+    attempts = [
+        {"Transport": dbus_module.String("le")},   # BLE only — ideal for wristbands
+        {"Transport": dbus_module.String("auto")},  # BLE + classic auto-select
+        {},                                          # no filter — widest net
+    ]
+    for flt in attempts:
+        try:
+            adapter.SetDiscoveryFilter(flt)
+            adapter.StartDiscovery()
+            transport = flt.get("Transport", "all")
+            log_fn(f"discovery started (transport={transport})")
+            return True
+        except Exception as exc:
+            log_fn(f"discovery attempt failed ({exc}), trying next filter")
+    return False
+
+
+def _hci_adapters_in_os() -> list[str]:
+    """Return hci adapter names visible to the kernel (UP or DOWN)."""
+    import re
+    try:
+        r = subprocess.run(["hciconfig", "-a"], timeout=5, capture_output=True, text=True)
+        return re.findall(r"^(hci\d+):", r.stdout, re.MULTILINE)
+    except Exception:
+        return []
+
+
+def _shell_enable_bluetooth(hci: str, log_fn) -> None:
+    """Escalating best-effort recovery: rfkill → hciconfig → bluetoothctl → systemctl."""
+
+    def _run(cmd: list[str], t: int = 5) -> bool:
+        try:
+            log_fn(f"shell: {' '.join(cmd)}")
+            r = subprocess.run(cmd, timeout=t, capture_output=True)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    # 1. rfkill unblock (soft/hard block)
+    _run(["rfkill", "unblock", "bluetooth"]) or _run(["rfkill", "unblock", "all"])
+    time.sleep(0.5)
+
+    # 2. hciconfig <hci> up — try direct then non-interactive sudo
+    if not _run(["hciconfig", hci, "up"]):
+        _run(["sudo", "-n", "hciconfig", hci, "up"])
+    time.sleep(0.5)
+
+    # 3. bluetoothctl power on
+    try:
+        log_fn("shell: bluetoothctl power on")
+        r = subprocess.run(
+            ["bluetoothctl", "power", "on"],
+            timeout=10,
+            capture_output=True,
+            text=True,
+        )
+        out = (r.stdout + r.stderr).strip()
+        if out:
+            log_fn(f"bluetoothctl: {out}")
+    except Exception:
+        pass
+    time.sleep(1.0)
+
+    # 4. Brief bluetoothctl scan le warm-up — wakes up the BLE stack
+    try:
+        log_fn("shell: bluetoothctl scan le (warm-up)")
+        subprocess.run(
+            ["timeout", "3", "bluetoothctl", "scan", "le"],
+            timeout=5,
+            capture_output=True,
+        )
+    except Exception:
+        pass
+    time.sleep(1.0)
+
+    # 5. Restart bluetooth service (non-interactive sudo, then plain)
+    if not _run(["sudo", "-n", "systemctl", "restart", "bluetooth.service"], 15):
+        _run(["systemctl", "restart", "bluetooth.service"], 15)
+    time.sleep(3.0)
 
 
 def checksum(frame: list[int]) -> int:
@@ -273,6 +362,55 @@ class C60A82CDevice:
         self._ensure_adapter_powered(bus, dbus_module)
         self._ensure_connected(bus, dbus_module)
 
+    def diagnose_adapter(self) -> dict[str, object]:
+        """
+        Proactive health check: verifies the BT adapter is on and BT is scannable.
+        Returns a dict with keys: powered (bool), recoverable (bool), error (str|None).
+        Raises DeviceError only if recovery is impossible.
+        """
+        info: dict[str, object] = {"powered": False, "recoverable": True, "error": None}
+        try:
+            bus, dbus_module = self._bus()
+            self._ensure_adapter_powered(bus, dbus_module)
+            info["powered"] = True
+        except DeviceError as exc:
+            info["error"] = str(exc)
+            info["recoverable"] = False
+            self._log(f"diagnose: adapter fault — {exc}")
+        return info
+
+    def _preflight_scan(self, bus, dbus_module, scan_timeout: float = 5.0) -> None:
+        """Short discovery pass to verify BT can see at least one device in range."""
+        adapter_obj = bus.get_object(BLUEZ_SVC, self.adapter_path)
+        adapter = dbus_module.Interface(adapter_obj, ADAPTER_IFACE)
+        manager = self._get_manager(bus, dbus_module)
+
+        self._log(f"preflight scan on {self.hci} ({scan_timeout:.0f}s)")
+        started = _start_discovery(adapter, dbus_module, self._log)
+        try:
+            deadline = time.monotonic() + scan_timeout
+            while time.monotonic() < deadline:
+                time.sleep(1.0)
+                visible = [
+                    path
+                    for path, ifaces in manager.GetManagedObjects().items()
+                    if DEVICE_IFACE in ifaces
+                ]
+                if visible:
+                    self._log(f"preflight: {len(visible)} device(s) visible")
+                    return
+        finally:
+            if started:
+                try:
+                    adapter.StopDiscovery()
+                except Exception:
+                    pass
+
+        raise DeviceError(
+            f"Bluetooth adapter {self.hci} is on but no devices found — "
+            "ensure the target device is powered on and in range"
+        )
+
     @property
     def adapter_path(self) -> str:
         return f"/org/bluez/{self.hci}"
@@ -292,39 +430,73 @@ class C60A82CDevice:
         return None
 
     def _ensure_adapter_powered(self, bus, dbus_module) -> None:
-        adapter = bus.get_object(BLUEZ_SVC, self.adapter_path)
-        props = dbus_module.Interface(adapter, PROPS_IFACE)
-        try:
-            powered = bool(props.Get(ADAPTER_IFACE, "Powered"))
-        except Exception as exc:
-            raise DeviceError(f"Bluetooth adapter {self.hci} not available") from exc
-        if powered:
+        def _get_powered() -> bool | None:
+            """True = on, False = off, None = adapter not reachable via D-Bus."""
+            try:
+                obj = bus.get_object(BLUEZ_SVC, self.adapter_path)
+                p = dbus_module.Interface(obj, PROPS_IFACE)
+                return bool(p.Get(ADAPTER_IFACE, "Powered"))
+            except Exception:
+                return None
+
+        def _dbus_set_powered() -> None:
+            try:
+                obj = bus.get_object(BLUEZ_SVC, self.adapter_path)
+                p = dbus_module.Interface(obj, PROPS_IFACE)
+                p.Set(ADAPTER_IFACE, "Powered", True)
+            except Exception:
+                pass
+
+        state = _get_powered()
+
+        if state is True:
             return
-        self._log(f"powering on adapter {self.hci}")
-        props.Set(ADAPTER_IFACE, "Powered", True)
+
+        if state is False:
+            # Adapter reachable but off — try D-Bus Set first (~5 s)
+            self._log(f"powering on adapter {self.hci} via D-Bus")
+            _dbus_set_powered()
+            for _ in range(10):
+                time.sleep(0.5)
+                if _get_powered() is True:
+                    return
+
+        # Adapter invisible or D-Bus Set failed — shell recovery
+        self._log(f"adapter {self.hci} did not power on via D-Bus, trying shell recovery")
+        _shell_enable_bluetooth(self.hci, self._log)
+
         for _ in range(20):
             time.sleep(0.5)
-            if bool(props.Get(ADAPTER_IFACE, "Powered")):
+            if _get_powered() is True:
+                self._log(f"adapter {self.hci} is now on")
                 return
-        raise DeviceError(f"Could not power on adapter {self.hci}")
+
+        adapters = _hci_adapters_in_os()
+        if adapters and self.hci in adapters:
+            hint = (
+                f"adapter {self.hci} is visible to the OS but not powered on — "
+                "try: sudo systemctl restart bluetooth.service"
+            )
+        elif adapters:
+            hint = f"OS-visible adapters: {', '.join(adapters)} (expected {self.hci})"
+        else:
+            hint = "no Bluetooth adapters detected by the OS"
+        raise DeviceError(
+            f"Could not power on Bluetooth adapter {self.hci} "
+            f"(tried D-Bus, rfkill, bluetoothctl) — {hint}"
+        )
 
     def _discover_device_path(self, bus, dbus_module, timeout: float = 12.0) -> str | None:
         adapter_obj = bus.get_object(BLUEZ_SVC, self.adapter_path)
         adapter = dbus_module.Interface(adapter_obj, ADAPTER_IFACE)
         start = time.monotonic()
-        started = False
+        self._log(f"starting discovery on {self.hci}")
+        started = _start_discovery(adapter, dbus_module, self._log)
         try:
             while time.monotonic() - start < timeout:
                 path = self._resolve_device_path(bus)
                 if path:
                     return path
-                if not started:
-                    self._log(f"starting discovery on {self.hci}")
-                    try:
-                        adapter.StartDiscovery()
-                    except Exception:
-                        pass
-                    started = True
                 time.sleep(1.0)
             return self._resolve_device_path(bus)
         finally:
@@ -351,6 +523,7 @@ class C60A82CDevice:
     def _ensure_connected(self, bus, dbus_module) -> None:
         device_path = self._resolve_device_path(bus)
         if not device_path:
+            self._preflight_scan(bus, dbus_module)
             device_path = self._discover_device_path(bus, dbus_module)
         if not device_path:
             raise DeviceError(f"Could not find device {self.mac}")
@@ -362,7 +535,10 @@ class C60A82CDevice:
             return
 
         self._log(f"connecting via {self.hci}")
-        dbus_module.Interface(dev, DEVICE_IFACE).Connect()
+        try:
+            dbus_module.Interface(dev, DEVICE_IFACE).Connect()
+        except Exception as exc:
+            raise DeviceError(f"Connection attempt failed: {exc}") from exc
         for _ in range(30):
             time.sleep(0.5)
             if props.Get(DEVICE_IFACE, "Connected"):
@@ -400,6 +576,7 @@ class C60A82CDevice:
 
     def _with_vendor_chars(self):
         bus, dbus_module = self._bus()
+        self._ensure_adapter_powered(bus, dbus_module)
         self._ensure_connected(bus, dbus_module)
         ff01_path, ff02_path = self._resolve_paths(bus)
         ff01 = dbus_module.Interface(bus.get_object(BLUEZ_SVC, ff01_path), GATT_IFACE)
