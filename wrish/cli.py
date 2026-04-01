@@ -98,6 +98,10 @@ def build_parser() -> argparse.ArgumentParser:
     button.add_argument("--count", type=int, default=None, help="Stop after N button events")
     button.set_defaults(handler=_handle_button)
 
+    game = subparsers.add_parser("game", help="Reaction-time game played with the bracelet button")
+    game.add_argument("--rounds", type=int, default=5, help="Number of rounds (default: 5)")
+    game.set_defaults(handler=_handle_game)
+
     listen = subparsers.add_parser("listen", help="Listen for the bracelet find-phone trigger on FF01")
     listen.add_argument("--timeout", type=float, default=None, help="Stop listening after N seconds")
     listen.add_argument("--count", type=int, default=None, help="Stop after N events")
@@ -317,6 +321,133 @@ def _handle_button(args: argparse.Namespace) -> int:
         reason="button",
     )
     print(f"Button events received: {count}")
+    return 0
+
+
+def _handle_game(args: argparse.Namespace) -> int:
+    import queue
+    import random
+    import threading
+    import time as _time
+
+    # ── ANSI colours ──────────────────────────────────────────────────
+    R  = "\033[1;31m"   # red bold
+    G  = "\033[1;32m"   # green bold
+    Y  = "\033[1;33m"   # yellow bold
+    C  = "\033[1;36m"   # cyan bold
+    B  = "\033[1m"      # bold
+    E  = "\033[0m"      # reset
+    CL = "\033[2J\033[H"  # clear screen + home
+
+    rounds = args.rounds
+
+    def _banner(r):
+        print(f"{CL}{B}🎮  Reaction Game  —  Round {r}/{rounds}{E}")
+        print("─" * 44)
+
+    def _grade(ms):
+        if ms <= 150:
+            return f"{Y}⚡ LIGHTNING!{E}",  900
+        if ms <= 280:
+            return f"{G}🏆 Excellent!{E}",  700
+        if ms <= 420:
+            return f"{G}✓ Good{E}",         500
+        if ms <= 650:
+            return f"~ OK",                 300
+        return f"{R}⏱ Slow…{E}",            max(0, 1000 - ms)
+
+    q: queue.Queue[float] = queue.Queue()
+    stop = threading.Event()
+    results: list[tuple[int, int] | None] = []
+
+    def _ble(device):
+        device.listen_for_button(on_event=lambda: q.put(_time.monotonic()), stop=stop)
+
+    def _game_loop(device):
+        # Start BLE listener in background thread
+        t = threading.Thread(target=_ble, args=(device,), daemon=True)
+        t.start()
+        _time.sleep(0.8)  # let BLE session establish
+
+        print(f"{CL}{B}🎮 Reaction Game{E}  —  {rounds} rounds")
+        print(f"{C}Connect:{E} wait for {B}★ PRESS NOW!{E}, then press the bracelet button.")
+        print(f"Starting in 3 s…")
+        _time.sleep(3.0)
+
+        for r in range(1, rounds + 1):
+            # ── Wait phase ─────────────────────────────────────────
+            delay = random.uniform(2.2, 5.0)
+            deadline = _time.monotonic() + delay
+            _banner(r)
+            print(f"\n  Get ready", end="", flush=True)
+            early = False
+
+            while _time.monotonic() < deadline:
+                _time.sleep(0.35)
+                print(".", end="", flush=True)
+                try:
+                    q.get_nowait()          # discard early press
+                    early = True
+                    break
+                except queue.Empty:
+                    pass
+
+            if early:
+                _banner(r)
+                print(f"\n  {R}✗ Too early! Wait for the signal.{E}\n")
+                results.append(None)
+                _time.sleep(1.8)
+                continue
+
+            # ── Active phase ────────────────────────────────────────
+            _banner(r)
+            print(f"\n  {G}{B}★   PRESS NOW!   ★{E}\n")
+            t0 = _time.monotonic()
+
+            try:
+                press_t = q.get(timeout=1.8)
+                ms = max(0, int((press_t - t0) * 1000))
+                label, score = _grade(ms)
+                results.append((ms, score))
+                _banner(r)
+                print(f"\n  Reaction: {B}{ms} ms{E}  {label}  {C}+{score} pts{E}\n")
+            except queue.Empty:
+                results.append(None)
+                _banner(r)
+                print(f"\n  {R}✗ Missed! No press within 1.8 s.{E}\n")
+
+            if r < rounds:
+                _time.sleep(1.8)
+
+        # ── Summary ─────────────────────────────────────────────────
+        stop.set()
+        t.join(timeout=2.0)
+
+        hits = [(ms, sc) for entry in results if entry is not None for ms, sc in [entry]]
+        misses = results.count(None)
+        total_score = sum(sc for _, sc in hits)
+
+        print(f"\n{CL}{B}🏁  Game Over!{E}")
+        print("═" * 44)
+        for i, entry in enumerate(results, 1):
+            if entry is None:
+                print(f"  Round {i}:  {R}MISS{E}")
+            else:
+                ms, sc = entry
+                print(f"  Round {i}:  {ms:>4} ms   {C}+{sc} pts{E}")
+        print("─" * 44)
+        if hits:
+            best = min(ms for ms, _ in hits)
+            avg  = sum(ms for ms, _ in hits) // len(hits)
+            print(f"  Best:     {B}{best} ms{E}")
+            print(f"  Average:  {avg} ms")
+            print(f"  Misses:   {misses}/{rounds}")
+        else:
+            print(f"  {R}No successful presses.{E}")
+        print(f"  {B}Total score:  {total_score} pts{E}")
+        print()
+
+    _run_with_ble_lock(args, _game_loop, reason="game")
     return 0
 
 

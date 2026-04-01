@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import datetime as dt
 import sys
+import threading
 import time
 from typing import Callable
 
@@ -811,6 +812,7 @@ class C60A82CDevice:
         timeout: float | None = None,
         max_events: int | None = None,
         on_event: Callable[[], None] | None = None,
+        stop: threading.Event | None = None,
     ) -> int:
         bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
         _dbus, GLib = _load_bluez_modules()
@@ -844,6 +846,12 @@ class C60A82CDevice:
             path_keyword="path",
         )
 
+        def check_stop():
+            if stop is not None and stop.is_set():
+                loop.quit()
+                return False
+            return True
+
         def run():
             try:
                 ff01.StartNotify()
@@ -852,6 +860,8 @@ class C60A82CDevice:
                 self._write_value(ff02, CAMERA_MODE_ENTER_CMD, dbus_module)
                 if timeout is not None:
                     GLib.timeout_add(int(timeout * 1000), loop.quit)
+                if stop is not None:
+                    GLib.timeout_add(100, check_stop)
             except Exception as exc:
                 events["error"] = exc
                 loop.quit()
