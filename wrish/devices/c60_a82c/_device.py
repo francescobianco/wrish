@@ -804,7 +804,13 @@ class C60A82CDevice:
         ]
         self._run_notification_sequence(frames, do_init=do_init)
 
-    def listen_for_button(self, *, timeout: float | None = None, max_events: int | None = None) -> int:
+    def listen_for_button(
+        self,
+        *,
+        timeout: float | None = None,
+        max_events: int | None = None,
+        on_event: Callable[[], None] | None = None,
+    ) -> int:
         bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
         _dbus, GLib = _load_bluez_modules()
         loop = GLib.MainLoop()
@@ -824,6 +830,8 @@ class C60A82CDevice:
                 last_event_at["value"] = now
                 events["count"] += 1
                 print(f"Button event #{events['count']}")
+                if on_event is not None:
+                    on_event()
                 if max_events is not None and events["count"] >= max_events:
                     loop.quit()
 

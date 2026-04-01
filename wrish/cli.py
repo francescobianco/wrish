@@ -98,6 +98,12 @@ def build_parser() -> argparse.ArgumentParser:
     button.add_argument("--count", type=int, default=None, help="Stop after N button events")
     button.set_defaults(handler=_handle_button)
 
+    horn = subparsers.add_parser("horn", help="Play a horn sound on each bracelet button press")
+    horn.add_argument("--timeout", type=float, default=None, help="Stop listening after N seconds")
+    horn.add_argument("--count", type=int, default=None, help="Stop after N button events")
+    horn.add_argument("--duration", type=float, default=0.4, help="Horn sound duration in seconds (default: 0.4)")
+    horn.set_defaults(handler=_handle_horn)
+
     lock_status = subparsers.add_parser("lock-status", help="Show the shared BLE lock status")
     lock_status.set_defaults(handler=_handle_lock_status)
 
@@ -304,6 +310,54 @@ def _handle_button(args: argparse.Namespace) -> int:
         reason="button",
     )
     print(f"Button events received: {count}")
+    return 0
+
+
+def _play_horn(duration: float = 0.4) -> None:
+    """Play a two-tone car horn using raw PCM piped to aplay (non-blocking).
+
+    Generates a mix of 392 Hz (G4) + 523 Hz (C5) — the classic two-tone horn
+    interval. Spawns aplay in a background process so it does not block the
+    BLE event loop.  Silently does nothing if aplay is not installed.
+    """
+    import array
+    import math
+    import shutil
+    import subprocess
+
+    if not shutil.which("aplay"):
+        return
+
+    sample_rate = 22050
+    n = int(sample_rate * duration)
+    buf = array.array("h")
+    for i in range(n):
+        t = i / sample_rate
+        # Brief linear fade-out over last 10 % to avoid click at end
+        envelope = 1.0 if i < n * 0.9 else (n - i) / (n * 0.1)
+        v = (math.sin(2 * math.pi * 392 * t) + math.sin(2 * math.pi * 523 * t)) / 2
+        buf.append(int(v * envelope * 28000))
+
+    subprocess.Popen(
+        ["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(sample_rate), "-c", "1"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).communicate(buf.tobytes())
+
+
+def _handle_horn(args: argparse.Namespace) -> int:
+    print("Horn mode — press the bracelet button to honk. Ctrl-C to stop.")
+    count = _run_with_ble_lock(
+        args,
+        lambda device: device.listen_for_button(
+            timeout=args.timeout,
+            max_events=args.count,
+            on_event=lambda: _play_horn(args.duration),
+        ),
+        reason="horn",
+    )
+    print(f"Horn events: {count}")
     return 0
 
 
