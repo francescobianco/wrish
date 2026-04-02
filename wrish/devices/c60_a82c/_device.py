@@ -12,6 +12,7 @@ from ._bluez import (
     _is_in_progress_error,
     _is_not_connected_error,
     _load_bluez_modules,
+    _shell_cycle_bluetooth,
     _start_discovery,
     _hci_adapters_in_os,
     _shell_enable_bluetooth,
@@ -208,6 +209,12 @@ class C60A82CDevice:
             info["recoverable"] = False
             self._log(f"diagnose: adapter fault — {exc}")
         return info
+
+    def cycle_bluetooth(self) -> None:
+        _shell_cycle_bluetooth(self.hci, self._log)
+        bus, dbus_module = self._bus()
+        self._ensure_adapter_powered(bus, dbus_module)
+        self._preflight_scan(bus, dbus_module, scan_timeout=8.0)
 
     def _preflight_scan(self, bus, dbus_module, scan_timeout: float = 5.0) -> bool:
         """

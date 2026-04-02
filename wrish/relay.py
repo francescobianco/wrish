@@ -11,6 +11,10 @@ import time
 from typing import Any
 from urllib import error, parse, request
 
+from ._sentinel import (
+    SENTINEL_DIAGNOSIS_INTERVAL,
+    maybe_cycle_sentinel_adapter,
+)
 from .concurrency import BleLockBusyError, ble_session
 from .devices.c60_a82c import C60A82CDevice, DeviceError
 
@@ -377,10 +381,6 @@ def run_relay(
         server.shutdown()
         server.server_close()
 
-
-_SENTINEL_DIAGNOSIS_INTERVAL = 300  # seconds between proactive adapter health checks
-
-
 def _run_sentinel_loop(
     *,
     mac: str,
@@ -394,6 +394,7 @@ def _run_sentinel_loop(
     device = C60A82CDevice(mac=mac, hci=hci, debug=debug)
     announced = False
     last_diagnosis = 0.0
+    recovery_failures = 0
 
     while True:
         now = time.monotonic()
@@ -417,6 +418,7 @@ def _run_sentinel_loop(
                         print("[sentinel] recovery attempt started")
                     device.connect()
                     connected = True
+                    recovery_failures = 0
 
                 if connected and not announced:
                     if debug:
@@ -425,12 +427,21 @@ def _run_sentinel_loop(
                     if debug:
                         print("[sentinel] notification sent")
                     announced = True
+                    recovery_failures = 0
+                elif connected:
+                    recovery_failures = 0
         except BleLockBusyError:
             if debug:
                 print("[sentinel] paused, BLE busy with another command")
         except Exception as exc:
             announced = False
+            recovery_failures += 1
             if debug:
                 print(f"[sentinel] {exc}")
+            maybe_cycle_sentinel_adapter(
+                device,
+                recovery_failures,
+                log_fn=print if debug else None,
+            )
 
         time.sleep(max(interval, 0.2))

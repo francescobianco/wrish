@@ -5,6 +5,11 @@ from pathlib import Path
 import sys
 import time
 
+from ._sentinel import (
+    SENTINEL_DIAGNOSIS_INTERVAL,
+    maybe_cycle_sentinel_adapter,
+    sentinel_state,
+)
 from .concurrency import BleLockBusyError, ble_lock_status, ble_session
 from .config import load_config
 from .devices.c60_a82c import (
@@ -646,34 +651,19 @@ def _handle_relay(args: argparse.Namespace) -> int:
     )
     return 0
 
-
-_SENTINEL_DIAGNOSIS_INTERVAL = 300  # seconds between proactive adapter health checks
-
-
-def _sentinel_state(status: dict[str, object]) -> str:
-    if not status.get("adapter_present", False):
-        return "adapter-missing"
-    if not status.get("adapter_powered", False):
-        return "adapter-off"
-    if not status.get("present", False):
-        return "device-missing"
-    if not status.get("connected", False):
-        return "device-disconnected"
-    return "connected"
-
-
 def _handle_sentinel(args: argparse.Namespace) -> int:
     device = build_device(args)
     announced = False
     last_diagnosis = 0.0
     last_state = "unknown"
+    recovery_failures = 0
 
     while True:
         now = time.monotonic()
 
         try:
             status = device.status()
-            state = _sentinel_state(status)
+            state = sentinel_state(status)
 
             if state != last_state and args.debug:
                 print(f"Sentinel: state={state}", file=sys.stderr)
@@ -700,7 +690,7 @@ def _handle_sentinel(args: argparse.Namespace) -> int:
                     with ble_session(blocking=False, reason="sentinel"):
                         device.connect()
                         status = device.status()
-                        state = _sentinel_state(status)
+                        state = sentinel_state(status)
                         last_state = state
                         if args.debug:
                             print(f"Sentinel: recovery result state={state}", file=sys.stderr)
@@ -709,6 +699,15 @@ def _handle_sentinel(args: argparse.Namespace) -> int:
                         print("Sentinel: paused, BLE busy with another command", file=sys.stderr)
                     time.sleep(max(args.interval, 0.2))
                     continue
+                if state != "connected":
+                    recovery_failures += 1
+                    maybe_cycle_sentinel_adapter(
+                        device,
+                        recovery_failures,
+                        log_fn=lambda message: print(message, file=sys.stderr) if args.debug else None,
+                    )
+                else:
+                    recovery_failures = 0
             elif now - last_diagnosis >= _SENTINEL_DIAGNOSIS_INTERVAL:
                 if args.debug:
                     print("Sentinel: periodic diagnosis started", file=sys.stderr)
@@ -734,13 +733,22 @@ def _handle_sentinel(args: argparse.Namespace) -> int:
                         if args.debug:
                             print("Sentinel: notification sent", file=sys.stderr)
                         announced = True
+                        recovery_failures = 0
                 except BleLockBusyError:
                     if args.debug:
                         print("Sentinel: notification deferred, BLE busy with another command", file=sys.stderr)
+            else:
+                recovery_failures = 0
         except DeviceError as exc:
             announced = False
+            recovery_failures += 1
             if args.debug:
                 print(f"Sentinel: recovery failed: {exc}", file=sys.stderr)
+            maybe_cycle_sentinel_adapter(
+                device,
+                recovery_failures,
+                log_fn=lambda message: print(message, file=sys.stderr) if args.debug else None,
+            )
 
         time.sleep(max(args.interval, 0.2))
 

@@ -158,3 +158,36 @@ def _shell_enable_bluetooth(hci: str, log_fn) -> None:
         fallback_timeout=15,
     )
     time.sleep(3.0)
+
+
+def _shell_cycle_bluetooth(hci: str, log_fn) -> None:
+    """Best-effort adapter power cycle before the usual enable/recovery path."""
+
+    def _run(cmd: list[str], t: int = 10) -> bool:
+        try:
+            log_fn(f"shell: {' '.join(cmd)}")
+            r = subprocess.run(cmd, timeout=t, capture_output=True)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    log_fn(f"cycling bluetooth adapter {hci}")
+
+    try:
+        log_fn("shell: bluetoothctl power off")
+        subprocess.run(
+            ["bluetoothctl", "power", "off"],
+            timeout=10,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        pass
+
+    _run(["hciconfig", hci, "down"]) or _run(["sudo", "-n", "hciconfig", hci, "down"], t=30)
+    _run(["rfkill", "block", "bluetooth"]) or _run(["rfkill", "block", "all"])
+    time.sleep(1.0)
+    _run(["rfkill", "unblock", "bluetooth"]) or _run(["rfkill", "unblock", "all"])
+    time.sleep(0.5)
+
+    _shell_enable_bluetooth(hci, log_fn)
