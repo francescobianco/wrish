@@ -127,9 +127,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     dialer = subparsers.add_parser("dialer", help="Decode K/T button sequences into dialed numbers")
     dialer.add_argument("--arm-timeout", type=float, default=10.0, help="Exit if the opening T T T sequence is not received in time")
-    dialer.add_argument("--cluster-gap", type=float, default=0.5, help="Max gap in seconds between presses of the same cluster")
-    dialer.add_argument("--k-min", type=int, default=4, help="Minimum fast presses to classify a cluster as K")
-    dialer.add_argument("--k-max", type=int, default=4, help="Maximum fast presses to classify a cluster as K")
+    dialer.add_argument("--cluster-gap", type=float, default=0.75, help="Max gap in seconds between presses of the same cluster")
+    dialer.add_argument("--k-min", type=int, default=3, help="Minimum fast presses to classify a cluster as K")
+    dialer.add_argument("--k-max", type=int, default=5, help="Maximum fast presses to classify a cluster as K")
     dialer.add_argument(
         "--simulate",
         default=None,
