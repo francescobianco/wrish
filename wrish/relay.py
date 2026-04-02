@@ -6,6 +6,7 @@ import base64
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import socket
+import sys
 import threading
 import time
 from typing import Any
@@ -13,10 +14,15 @@ from urllib import error, parse, request
 
 from ._sentinel import (
     SENTINEL_DIAGNOSIS_INTERVAL,
+    SENTINEL_NOTIFY_RETRY_INTERVAL,
     maybe_cycle_sentinel_adapter,
 )
 from .concurrency import BleLockBusyError, ble_session
 from .devices.c60_a82c import C60A82CDevice, DeviceError
+
+
+def _sentinel_log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
 
 
 def _coerce_text(value: bytes) -> tuple[str, bool]:
@@ -395,6 +401,7 @@ def _run_sentinel_loop(
     announced = False
     last_diagnosis = 0.0
     recovery_failures = 0
+    next_notify_attempt = 0.0
 
     while True:
         now = time.monotonic()
@@ -402,46 +409,57 @@ def _run_sentinel_loop(
         try:
             with ble_session(blocking=False, reason="relay-sentinel"):
                 # Proactive adapter self-diagnosis every DIAGNOSIS_INTERVAL seconds
-                if now - last_diagnosis >= _SENTINEL_DIAGNOSIS_INTERVAL:
+                if now - last_diagnosis >= SENTINEL_DIAGNOSIS_INTERVAL:
                     result = device.diagnose_adapter()
                     last_diagnosis = now
                     if debug:
                         if result["powered"]:
-                            print("[sentinel] periodic diagnosis ok")
+                            _sentinel_log("[sentinel] periodic diagnosis ok")
                         elif result["error"]:
-                            print(f"[sentinel] periodic diagnosis failed: {result['error']}")
+                            _sentinel_log(f"[sentinel] periodic diagnosis failed: {result['error']}")
 
                 connected = device.is_connected()
                 if not connected:
                     announced = False
                     if debug:
-                        print("[sentinel] recovery attempt started")
+                        _sentinel_log("[sentinel] recovery attempt started")
                     device.connect()
                     connected = True
                     recovery_failures = 0
 
-                if connected and not announced:
+                if connected and not announced and now >= next_notify_attempt:
                     if debug:
-                        print("[sentinel] connected, sending notification...")
-                    device.send_notification(app_name=app, title=title, body=body, do_init=True)
-                    if debug:
-                        print("[sentinel] notification sent")
-                    announced = True
-                    recovery_failures = 0
+                        _sentinel_log("[sentinel] connected, sending notification...")
+                    try:
+                        device.send_notification(app_name=app, title=title, body=body, do_init=True)
+                        if debug:
+                            _sentinel_log("[sentinel] notification sent")
+                        announced = True
+                        recovery_failures = 0
+                    except DeviceError as exc:
+                        next_notify_attempt = time.monotonic() + SENTINEL_NOTIFY_RETRY_INTERVAL
+                        if debug:
+                            _sentinel_log(
+                                "[sentinel] notification failed; "
+                                f"will retry in {SENTINEL_NOTIFY_RETRY_INTERVAL}s: {exc}"
+                            )
                 elif connected:
                     recovery_failures = 0
+                else:
+                    next_notify_attempt = 0.0
         except BleLockBusyError:
             if debug:
-                print("[sentinel] paused, BLE busy with another command")
+                _sentinel_log("[sentinel] paused, BLE busy with another command")
         except Exception as exc:
             announced = False
             recovery_failures += 1
+            next_notify_attempt = 0.0
             if debug:
-                print(f"[sentinel] {exc}")
+                _sentinel_log(f"[sentinel] {exc}")
             maybe_cycle_sentinel_adapter(
                 device,
                 recovery_failures,
-                log_fn=print if debug else None,
+                log_fn=_sentinel_log if debug else None,
             )
 
         time.sleep(max(interval, 0.2))

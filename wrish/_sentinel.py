@@ -5,6 +5,7 @@ from typing import Callable
 
 SENTINEL_DIAGNOSIS_INTERVAL = 300
 SENTINEL_ADAPTER_RESET_THRESHOLD = 4
+SENTINEL_NOTIFY_RETRY_INTERVAL = 60
 
 
 def sentinel_state(status: dict[str, object]) -> str:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import time
@@ -62,6 +63,15 @@ def _hci_adapters_in_os() -> list[str]:
         return []
 
 
+def _allow_system_service_restart() -> bool:
+    return os.environ.get("WRISH_ALLOW_SYSTEM_BT_RESTART", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _shell_enable_bluetooth(hci: str, log_fn) -> None:
     """Escalating best-effort recovery: rfkill → hciconfig → bluetoothctl → systemctl."""
 
@@ -73,53 +83,12 @@ def _shell_enable_bluetooth(hci: str, log_fn) -> None:
         except Exception:
             return False
 
-    def _run_with_fallback(
-        primary: list[str],
-        fallback: list[str],
-        *,
-        primary_timeout: int = 30,
-        fallback_timeout: int = 15,
-    ) -> bool:
-        primary_text = " ".join(primary)
-        fallback_text = " ".join(fallback)
-        try:
-            log_fn(f"shell: {primary_text}")
-            completed = subprocess.run(
-                primary,
-                timeout=primary_timeout,
-                capture_output=True,
-                text=True,
-            )
-            if completed.returncode == 0:
-                log_fn("shell: privileged recovery step completed")
-                return True
-            details = (completed.stderr or completed.stdout).strip()
-            if details:
-                log_fn(f"shell: privileged recovery step failed ({details})")
-            log_fn(f"shell: continuing recovery without privileges via {fallback_text}")
-        except subprocess.TimeoutExpired:
-            log_fn(
-                f"shell: privileged recovery step did not complete within {primary_timeout}s"
-            )
-            log_fn(f"shell: continuing recovery without privileges via {fallback_text}")
-        except Exception as exc:
-            log_fn(f"shell: privileged recovery step failed ({exc})")
-            log_fn(f"shell: continuing recovery without privileges via {fallback_text}")
-
-        return _run(fallback, t=fallback_timeout)
-
     # 1. rfkill unblock (soft/hard block)
     _run(["rfkill", "unblock", "bluetooth"]) or _run(["rfkill", "unblock", "all"])
     time.sleep(0.5)
 
-    # 2. hciconfig <hci> up — try direct then non-interactive sudo
-    if not _run(["hciconfig", hci, "up"]):
-        _run_with_fallback(
-            ["sudo", "-n", "hciconfig", hci, "up"],
-            ["hciconfig", hci, "up"],
-            primary_timeout=30,
-            fallback_timeout=10,
-        )
+    # 2. hciconfig <hci> up
+    _run(["hciconfig", hci, "up"], t=10)
     time.sleep(0.5)
 
     # 3. bluetoothctl power on
@@ -150,14 +119,15 @@ def _shell_enable_bluetooth(hci: str, log_fn) -> None:
         pass
     time.sleep(1.0)
 
-    # 5. Restart bluetooth service (non-interactive sudo, then plain)
-    _run_with_fallback(
-        ["sudo", "-n", "systemctl", "restart", "bluetooth.service"],
-        ["systemctl", "restart", "bluetooth.service"],
-        primary_timeout=30,
-        fallback_timeout=15,
-    )
-    time.sleep(3.0)
+    # 5. Optional system bluetooth.service restart for explicitly enabled hosts.
+    if _allow_system_service_restart():
+        _run(["systemctl", "restart", "bluetooth.service"], t=15)
+        time.sleep(3.0)
+    else:
+        log_fn(
+            "shell: skipping system bluetooth.service restart "
+            "(set WRISH_ALLOW_SYSTEM_BT_RESTART=1 to enable)"
+        )
 
 
 def _shell_cycle_bluetooth(hci: str, log_fn) -> None:
@@ -184,7 +154,7 @@ def _shell_cycle_bluetooth(hci: str, log_fn) -> None:
     except Exception:
         pass
 
-    _run(["hciconfig", hci, "down"]) or _run(["sudo", "-n", "hciconfig", hci, "down"], t=30)
+    _run(["hciconfig", hci, "down"], t=10)
     _run(["rfkill", "block", "bluetooth"]) or _run(["rfkill", "block", "all"])
     time.sleep(1.0)
     _run(["rfkill", "unblock", "bluetooth"]) or _run(["rfkill", "unblock", "all"])

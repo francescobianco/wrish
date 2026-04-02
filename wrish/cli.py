@@ -7,6 +7,7 @@ import time
 
 from ._sentinel import (
     SENTINEL_DIAGNOSIS_INTERVAL,
+    SENTINEL_NOTIFY_RETRY_INTERVAL,
     maybe_cycle_sentinel_adapter,
     sentinel_state,
 )
@@ -657,6 +658,7 @@ def _handle_sentinel(args: argparse.Namespace) -> int:
     last_diagnosis = 0.0
     last_state = "unknown"
     recovery_failures = 0
+    next_notify_attempt = 0.0
 
     while True:
         now = time.monotonic()
@@ -675,7 +677,7 @@ def _handle_sentinel(args: argparse.Namespace) -> int:
                     print("Sentinel: recovery attempt started", file=sys.stderr)
 
                 # Proactive adapter self-diagnosis on degraded state and periodically.
-                if state.startswith("adapter-") or (now - last_diagnosis >= _SENTINEL_DIAGNOSIS_INTERVAL):
+                if state.startswith("adapter-") or (now - last_diagnosis >= SENTINEL_DIAGNOSIS_INTERVAL):
                     if args.debug:
                         print(f"Sentinel: diagnosis started (state={state})", file=sys.stderr)
                     result = device.diagnose_adapter()
@@ -708,7 +710,7 @@ def _handle_sentinel(args: argparse.Namespace) -> int:
                     )
                 else:
                     recovery_failures = 0
-            elif now - last_diagnosis >= _SENTINEL_DIAGNOSIS_INTERVAL:
+            elif now - last_diagnosis >= SENTINEL_DIAGNOSIS_INTERVAL:
                 if args.debug:
                     print("Sentinel: periodic diagnosis started", file=sys.stderr)
                 result = device.diagnose_adapter()
@@ -719,7 +721,7 @@ def _handle_sentinel(args: argparse.Namespace) -> int:
                     elif result["error"]:
                         print(f"Sentinel: periodic diagnosis failed: {result['error']}", file=sys.stderr)
 
-            if state == "connected" and not announced:
+            if state == "connected" and not announced and now >= next_notify_attempt:
                 try:
                     with ble_session(blocking=False, reason="sentinel-notify"):
                         if args.debug:
@@ -737,11 +739,22 @@ def _handle_sentinel(args: argparse.Namespace) -> int:
                 except BleLockBusyError:
                     if args.debug:
                         print("Sentinel: notification deferred, BLE busy with another command", file=sys.stderr)
+                except DeviceError as exc:
+                    next_notify_attempt = time.monotonic() + SENTINEL_NOTIFY_RETRY_INTERVAL
+                    if args.debug:
+                        print(
+                            "Sentinel: notification failed; "
+                            f"will retry in {SENTINEL_NOTIFY_RETRY_INTERVAL}s: {exc}",
+                            file=sys.stderr,
+                        )
             else:
                 recovery_failures = 0
+                if state != "connected":
+                    next_notify_attempt = 0.0
         except DeviceError as exc:
             announced = False
             recovery_failures += 1
+            next_notify_attempt = 0.0
             if args.debug:
                 print(f"Sentinel: recovery failed: {exc}", file=sys.stderr)
             maybe_cycle_sentinel_adapter(
