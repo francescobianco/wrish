@@ -7,7 +7,9 @@ import time
 
 from ._sentinel import (
     SENTINEL_DIAGNOSIS_INTERVAL,
+    SENTINEL_FIND_PHONE_POLL_INTERVAL,
     SENTINEL_NOTIFY_RETRY_INTERVAL,
+    maybe_run_sentinel_dialer,
     maybe_cycle_sentinel_adapter,
     sentinel_state,
 )
@@ -751,6 +753,15 @@ def _handle_sentinel(args: argparse.Namespace) -> int:
                 recovery_failures = 0
                 if state != "connected":
                     next_notify_attempt = 0.0
+                else:
+                    try:
+                        maybe_run_sentinel_dialer(
+                            device,
+                            listen_timeout=min(max(args.interval, 0.2), SENTINEL_FIND_PHONE_POLL_INTERVAL),
+                            log_fn=lambda message: print(message, file=sys.stderr),
+                        )
+                    except DeviceError:
+                        raise
         except DeviceError as exc:
             announced = False
             recovery_failures += 1

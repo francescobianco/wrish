@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field
 import datetime as dt
 import sys
 import threading
@@ -100,6 +101,7 @@ class C60A82CDevice:
     mac: str
     hci: str = "hci0"
     debug: bool = False
+    _log_suppressed: int = field(init=False, default=0, repr=False)
 
     def __post_init__(self) -> None:
         self.mac = self.mac.upper()
@@ -109,8 +111,16 @@ class C60A82CDevice:
         return f"/org/bluez/{self.hci}/dev_{self.mac.replace(':', '_')}"
 
     def _log(self, message: str) -> None:
-        if self.debug:
+        if self.debug and self._log_suppressed == 0:
             print(f"[wrish:{self.mac}] {message}", file=sys.stderr)
+
+    @contextmanager
+    def _suppress_debug_logs(self):
+        self._log_suppressed += 1
+        try:
+            yield
+        finally:
+            self._log_suppressed = max(0, self._log_suppressed - 1)
 
     def _bus(self):
         dbus, _glib = _load_bluez_modules()
@@ -898,6 +908,7 @@ class C60A82CDevice:
         timeout: float | None = None,
         max_events: int | None = None,
         on_event: Callable[[], None] | None = None,
+        quiet: bool = False,
     ) -> int:
         """Listen on FF01 for the bracelet's find-phone trigger.
 
@@ -908,7 +919,9 @@ class C60A82CDevice:
         Matched as a prefix: the sniffed frame is 12 bytes but the documented
         frame is 20 bytes; both start with the same FIND_PHONE_EVENT prefix.
         """
-        bus, dbus_module, ff01_path, ff01, _ff02 = self._with_vendor_chars()
+        log_context = self._suppress_debug_logs() if quiet else nullcontext()
+        with log_context:
+            bus, dbus_module, ff01_path, ff01, _ff02 = self._with_vendor_chars()
         _dbus, GLib = _load_bluez_modules()
         loop = GLib.MainLoop()
         events: dict[str, object] = {"count": 0}
@@ -965,8 +978,17 @@ class C60A82CDevice:
         cluster_gap: float = 0.9,
         k_min: int = 3,
         k_max: int = 4,
+        on_symbol: Callable[[str], None] | None = None,
+        on_status: Callable[[str], None] | None = None,
     ) -> str:
         bus, dbus_module, ff01_path, ff01, ff02 = self._with_vendor_chars()
+        ctx = {
+            "bus": bus,
+            "dbus_module": dbus_module,
+            "ff01_path": ff01_path,
+            "ff01": ff01,
+            "ff02": ff02,
+        }
         _dbus, GLib = _load_bluez_modules()
         loop = GLib.MainLoop()
         started_at = time.monotonic()
@@ -976,13 +998,92 @@ class C60A82CDevice:
         result = {"status": "timeout"}
         feedback_messages: list[str] = []
         last_event_at = {"value": None}
+        listener_active = {"value": False}
+        receiver_attached = {"value": False}
 
         def send_open_feedback() -> None:
             self._log(f"sending {' '.join(f'{b:02x}' for b in FIND_DEVICE_CMD)}")
-            self._write_value(ff02, FIND_DEVICE_CMD, dbus_module)
+            self._write_value(ctx["ff02"], FIND_DEVICE_CMD, ctx["dbus_module"])
             time.sleep(0.8)
             self._log(f"sending {' '.join(f'{b:02x}' for b in FIND_DEVICE_CMD)}")
-            self._write_value(ff02, FIND_DEVICE_CMD, dbus_module)
+            self._write_value(ctx["ff02"], FIND_DEVICE_CMD, ctx["dbus_module"])
+
+        def set_button_mode(enabled: bool) -> None:
+            frame = CAMERA_MODE_ENTER_CMD if enabled else CAMERA_MODE_EXIT_CMD
+            self._log(f"sending {' '.join(f'{b:02x}' for b in frame)}")
+            self._write_value(ctx["ff02"], frame, ctx["dbus_module"])
+            time.sleep(0.3)
+
+        def detach_signal_receiver() -> None:
+            if not receiver_attached["value"]:
+                return
+            try:
+                ctx["bus"].remove_signal_receiver(
+                    on_changed,
+                    signal_name="PropertiesChanged",
+                    dbus_interface=PROPS_IFACE,
+                    path=ctx["ff01_path"],
+                )
+            except Exception:
+                pass
+            receiver_attached["value"] = False
+
+        def attach_signal_receiver() -> None:
+            ctx["bus"].add_signal_receiver(
+                on_changed,
+                signal_name="PropertiesChanged",
+                dbus_interface=PROPS_IFACE,
+                path=ctx["ff01_path"],
+                path_keyword="path",
+            )
+            receiver_attached["value"] = True
+
+        def restart_button_listener() -> None:
+            detach_signal_receiver()
+            try:
+                ctx["ff01"].StopNotify()
+            except Exception:
+                pass
+            listener_active["value"] = False
+            time.sleep(0.2)
+            bus2, dbus2, ff01_path2, ff01_2, ff02_2 = self._with_vendor_chars()
+            ctx["bus"] = bus2
+            ctx["dbus_module"] = dbus2
+            ctx["ff01_path"] = ff01_path2
+            ctx["ff01"] = ff01_2
+            ctx["ff02"] = ff02_2
+            attach_signal_receiver()
+            ctx["ff01"].StartNotify()
+            listener_active["value"] = True
+            time.sleep(0.3)
+            set_button_mode(True)
+
+        def send_session_feedback(body: str) -> None:
+            try:
+                set_button_mode(False)
+                detach_signal_receiver()
+                try:
+                    ctx["ff01"].StopNotify()
+                except Exception:
+                    pass
+                listener_active["value"] = False
+                time.sleep(0.2)
+                self.send_notification(
+                    app_name="whatsapp",
+                    title="wrish",
+                    body=body,
+                    do_init=True,
+                )
+            except Exception as exc:
+                self._log(f"session feedback failed: {exc}")
+            finally:
+                if result["status"] == "timeout":
+                    try:
+                        restart_button_listener()
+                    except Exception as exc:
+                        self._log(f"button listener restart failed: {exc}")
+                        result["status"] = "button-restart-failed"
+                        loop.quit()
 
         def flush_cluster() -> None:
             count = cluster_count["value"]
@@ -1001,27 +1102,41 @@ class C60A82CDevice:
             if symbol is None:
                 self._log(f"ignoring cluster of {count} button presses")
                 if not session["open"]:
-                    print(f"Dialer exited: invalid opening cluster ({count} presses)")
+                    message = f"Dialer exited: invalid opening cluster ({count} presses)"
+                    print(message)
+                    if on_status is not None:
+                        on_status(message)
                     result["status"] = "invalid-opening-cluster"
                     loop.quit()
                 return
 
             print(symbol)
+            if on_symbol is not None:
+                on_symbol(symbol)
 
             if not session["open"]:
                 if symbol != "T":
-                    print("Dialer exited: expected T T T to open the session")
+                    message = "Dialer exited: expected T T T to open the session"
+                    print(message)
+                    if on_status is not None:
+                        on_status(message)
                     result["status"] = "expected-opening-t"
                     loop.quit()
                     return
 
                 session["open_t_count"] += 1
-                print(f"OPEN {session['open_t_count']}/3")
+                message = f"OPEN {session['open_t_count']}/3"
+                print(message)
+                if on_status is not None:
+                    on_status(message)
                 if session["open_t_count"] >= 3:
                     session["open"] = True
                     session["exit_k_count"] = 0
                     print("SESSION OPEN")
+                    if on_status is not None:
+                        on_status("SESSION OPEN")
                     send_open_feedback()
+                    send_session_feedback("dialer on")
                 return
 
             print(f"TRACE {symbol}")
@@ -1029,6 +1144,8 @@ class C60A82CDevice:
                 session["exit_k_count"] += 1
                 if session["exit_k_count"] >= 2:
                     print("SESSION CLOSE")
+                    if on_status is not None:
+                        on_status("SESSION CLOSE")
                     feedback_messages.append("dialer off")
                     result["status"] = "closed"
                     loop.quit()
@@ -1067,27 +1184,23 @@ class C60A82CDevice:
                     return False
 
             if not session["open"] and now - started_at > arm_timeout:
-                print("Dialer timeout: T T T not received")
+                message = "Dialer timeout: T T T not received"
+                print(message)
+                if on_status is not None:
+                    on_status(message)
                 result["status"] = "open-timeout"
                 loop.quit()
                 return False
 
             return True
 
-        bus.add_signal_receiver(
-            on_changed,
-            signal_name="PropertiesChanged",
-            dbus_interface=PROPS_IFACE,
-            path=ff01_path,
-            path_keyword="path",
-        )
-
         def run():
             try:
-                ff01.StartNotify()
+                attach_signal_receiver()
+                ctx["ff01"].StartNotify()
+                listener_active["value"] = True
                 time.sleep(0.3)
-                self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_ENTER_CMD)}")
-                self._write_value(ff02, CAMERA_MODE_ENTER_CMD, dbus_module)
+                set_button_mode(True)
                 GLib.timeout_add(100, heartbeat)
             except Exception as exc:
                 result["error"] = exc
@@ -1098,15 +1211,16 @@ class C60A82CDevice:
             loop.run()
         finally:
             try:
-                self._log(f"sending {' '.join(f'{b:02x}' for b in CAMERA_MODE_EXIT_CMD)}")
-                self._write_value(ff02, CAMERA_MODE_EXIT_CMD, dbus_module)
-                time.sleep(0.3)
+                if listener_active["value"]:
+                    set_button_mode(False)
             except Exception:
                 pass
             try:
-                ff01.StopNotify()
+                ctx["ff01"].StopNotify()
             except Exception:
                 pass
+            listener_active["value"] = False
+            detach_signal_receiver()
 
         if "error" in result:
             raise DeviceError(f"Could not start BLE notifications: {result['error']}") from result["error"]

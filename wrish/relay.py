@@ -14,7 +14,9 @@ from urllib import error, parse, request
 
 from ._sentinel import (
     SENTINEL_DIAGNOSIS_INTERVAL,
+    SENTINEL_FIND_PHONE_POLL_INTERVAL,
     SENTINEL_NOTIFY_RETRY_INTERVAL,
+    maybe_run_sentinel_dialer,
     maybe_cycle_sentinel_adapter,
 )
 from .concurrency import BleLockBusyError, ble_session
@@ -445,6 +447,14 @@ def _run_sentinel_loop(
                             )
                 elif connected:
                     recovery_failures = 0
+                    try:
+                        maybe_run_sentinel_dialer(
+                            device,
+                            listen_timeout=min(max(interval, 0.2), SENTINEL_FIND_PHONE_POLL_INTERVAL),
+                            log_fn=_sentinel_log,
+                        )
+                    except DeviceError:
+                        raise
                 else:
                     next_notify_attempt = 0.0
         except BleLockBusyError:
