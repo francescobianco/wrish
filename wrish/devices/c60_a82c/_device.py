@@ -994,6 +994,7 @@ class C60A82CDevice:
         started_at = time.monotonic()
         last_press_at = {"value": None}
         cluster_count = {"value": 0}
+        cluster_press_times: list[float] = []
         session = {"open": False, "open_t_count": 0, "exit_k_count": 0}
         result = {"status": "timeout"}
         feedback_messages: list[str] = []
@@ -1089,6 +1090,7 @@ class C60A82CDevice:
             count = cluster_count["value"]
             if count <= 0:
                 return
+            press_times = cluster_press_times[:]
 
             symbol = None
             if count == 1:
@@ -1097,10 +1099,24 @@ class C60A82CDevice:
                 symbol = "K"
 
             cluster_count["value"] = 0
+            cluster_press_times.clear()
             last_press_at["value"] = None
 
             if symbol is None:
-                self._log(f"ignoring cluster of {count} button presses")
+                timing_suffix = ""
+                if press_times:
+                    base = press_times[0]
+                    relative = [timestamp - base for timestamp in press_times]
+                    deltas = [
+                        press_times[index] - press_times[index - 1]
+                        for index in range(1, len(press_times))
+                    ]
+                    timing_suffix = (
+                        " "
+                        f"relative_seconds={','.join(f'{value:.3f}' for value in relative)} "
+                        f"delta_seconds={','.join(f'{value:.3f}' for value in deltas) if deltas else ''}"
+                    )
+                self._log(f"ignoring cluster of {count} button presses{timing_suffix}")
                 if not session["open"]:
                     message = f"Dialer exited: invalid opening cluster ({count} presses)"
                     print(message)
@@ -1142,7 +1158,7 @@ class C60A82CDevice:
             print(f"TRACE {symbol}")
             if symbol == "K":
                 session["exit_k_count"] += 1
-                if session["exit_k_count"] >= 2:
+                if session["exit_k_count"] >= 3:
                     print("SESSION CLOSE")
                     if on_status is not None:
                         on_status("SESSION CLOSE")
@@ -1170,6 +1186,7 @@ class C60A82CDevice:
                 flush_cluster()
 
             cluster_count["value"] += 1
+            cluster_press_times.append(now)
             last_press_at["value"] = now
 
         def heartbeat():

@@ -129,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     dialer.add_argument("--arm-timeout", type=float, default=10.0, help="Exit if the opening T T T sequence is not received in time")
     dialer.add_argument("--cluster-gap", type=float, default=0.75, help="Max gap in seconds between presses of the same cluster")
     dialer.add_argument("--k-min", type=int, default=3, help="Minimum fast presses to classify a cluster as K")
-    dialer.add_argument("--k-max", type=int, default=5, help="Maximum fast presses to classify a cluster as K")
+    dialer.add_argument("--k-max", type=int, default=6, help="Maximum fast presses to classify a cluster as K")
     dialer.add_argument(
         "--simulate",
         default=None,
@@ -623,7 +623,7 @@ def _handle_dialer(args: argparse.Namespace) -> int:
 
     print("Dialer listening...")
     print("Open sequence: T T T")
-    print("Close sequence after open: K K")
+    print("Close sequence after open: K K K")
     status = _run_with_ble_lock(
         args,
         lambda device: device.run_dialer(

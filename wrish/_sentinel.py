@@ -84,7 +84,7 @@ def maybe_run_sentinel_dialer(
         arm_timeout=10.0,
         cluster_gap=0.75,
         k_min=3,
-        k_max=5,
+        k_max=6,
         on_symbol=on_symbol,
         on_status=on_status,
     )
